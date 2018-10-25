@@ -27,6 +27,11 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+/* 默认RDB文件的文件为dump.rdb
+ *
+ * 
+ */
+
 #include "server.h"
 #include "lzf.h"    /* LZF compression library */
 #include "zipmap.h"
@@ -1099,6 +1104,10 @@ int rdbSaveInfoAuxFields(rio *rdb, int flags, rdbSaveInfo *rsi) {
  * When the function returns C_ERR and if 'error' is not NULL, the
  * integer pointed by 'error' is set to the value of errno just after the I/O
  * error. */
+/* 以RDB格式生成数据库转储，将其发送到指定的Redis I / O通道。 
+ * 成功时返回C_OK，否则返回C_ERR，由于I / O错误，可能会丢失部分输出或所有输出。 
+ * 当函数返回C_ERR并且'error'不为NULL时，'error'指向的整数在I / O错误之后被设置为errno的值。
+ */
 int rdbSaveRio(rio *rdb, int *error, int flags, rdbSaveInfo *rsi) {
     dictIterator *di = NULL;
     dictEntry *de;
@@ -1111,8 +1120,10 @@ int rdbSaveRio(rio *rdb, int *error, int flags, rdbSaveInfo *rsi) {
         rdb->update_cksum = rioGenericUpdateChecksum;
     snprintf(magic,sizeof(magic),"REDIS%04d",RDB_VERSION);
     if (rdbWriteRaw(rdb,magic,9) == -1) goto werr;
+    // 将rdb文件的默认信息写入rio中
     if (rdbSaveInfoAuxFields(rdb,flags,rsi) == -1) goto werr;
 
+    //遍历所有服务器内的数据库
     for (j = 0; j < server.dbnum; j++) {
         redisDb *db = server.db+j;
         dict *d = db->dict;
@@ -1135,6 +1146,7 @@ int rdbSaveRio(rio *rdb, int *error, int flags, rdbSaveInfo *rsi) {
         if (rdbSaveLen(rdb,expires_size) == -1) goto werr;
 
         /* Iterate this DB writing every entry */
+        // 遍历数据库所有的数据库
         while((de = dictNext(di)) != NULL) {
             sds keystr = dictGetKey(de);
             robj key, *o = dictGetVal(de);
@@ -1142,6 +1154,7 @@ int rdbSaveRio(rio *rdb, int *error, int flags, rdbSaveInfo *rsi) {
 
             initStaticStringObject(key,keystr);
             expire = getExpire(db,&key);
+            // 将键对象 值对象 过期时间写到rio中
             if (rdbSaveKeyValuePair(rdb,&key,o,expire) == -1) goto werr;
 
             /* When this RDB is produced as part of an AOF rewrite, move
@@ -1216,6 +1229,7 @@ werr: /* Write error. */
 }
 
 /* Save the DB on disk. Return C_ERR on error, C_OK on success. */
+/* 保存数据库到磁盘，返回C_ERR或C_OK */
 int rdbSave(char *filename, rdbSaveInfo *rsi) {
     char tmpfile[256];
     char cwd[MAXPATHLEN]; /* Current working dir path for error messages. */
@@ -1236,23 +1250,27 @@ int rdbSave(char *filename, rdbSaveInfo *rsi) {
         return C_ERR;
     }
 
+    // 将rio对象rdb指向已存在的rio文件对象
     rioInitWithFile(&rdb,fp);
 
     if (server.rdb_save_incremental_fsync)
         rioSetAutoSync(&rdb,REDIS_AUTOSYNC_BYTES);
 
+    // 持久化rio操作，传入rio文件对象
     if (rdbSaveRio(&rdb,&error,RDB_SAVE_NONE,rsi) == C_ERR) {
         errno = error;
         goto werr;
     }
 
     /* Make sure data will not remain on the OS's output buffers */
+    // 文件操作，确保文件不在缓冲区，而是写到磁盘
     if (fflush(fp) == EOF) goto werr;
     if (fsync(fileno(fp)) == -1) goto werr;
     if (fclose(fp) == EOF) goto werr;
 
     /* Use RENAME to make sure the DB file is changed atomically only
      * if the generate DB file is ok. */
+    // 使用RENAME确保仅在生成DB文件正常时才自动更改DB文件
     if (rename(tmpfile,filename) == -1) {
         char *cwdp = getcwd(cwd,MAXPATHLEN);
         serverLog(LL_WARNING,
@@ -1279,6 +1297,7 @@ werr:
     return C_ERR;
 }
 
+// 后台执行RBD持久化BGSAVE操作
 int rdbSaveBackground(char *filename, rdbSaveInfo *rsi) {
     pid_t childpid;
     long long start;
@@ -1289,6 +1308,11 @@ int rdbSaveBackground(char *filename, rdbSaveInfo *rsi) {
     server.lastbgsave_try = time(NULL);
     openChildInfoPipe();
 
+    /* fork函数开始的时间，记录耗时，创建子进程
+     * 从fork处起父进程和子进程同时执行这段，代码，父进程返回子进程的pid，子进程返回0
+     * 所以子进程会进if，父进程会进else，分别执行两段代码，最后return
+     * 问题，子进程什么时候被杀死，这个统计时间为什么这样
+     */
     start = ustime();
     if ((childpid = fork()) == 0) {
         int retval;
@@ -1296,6 +1320,11 @@ int rdbSaveBackground(char *filename, rdbSaveInfo *rsi) {
         /* Child */
         closeListeningSockets(0);
         redisSetProcTitle("redis-rdb-bgsave");
+        /* 划重点，将数据库写到filename文件中，这样必然要经过文件系统
+         * 如果file在pblk设备中，则会正常通过系统调用再经过文件系统再到lightnvm，写入openchannel SSD
+         * 这里如果要直接写到ocssd，需要调用liblightnvm库，直接写入到chunk中
+         * 因为没有文件概念，需要组织地址空间，能写入，也能正确加载
+         */
         retval = rdbSave(filename,rsi);
         if (retval == C_OK) {
             size_t private_dirty = zmalloc_get_private_dirty(-1);
@@ -2398,6 +2427,7 @@ void saveCommand(client *c) {
 }
 
 /* BGSAVE [SCHEDULE] */
+// BGSAVE命令实现
 void bgsaveCommand(client *c) {
     int schedule = 0;
 
@@ -2415,9 +2445,11 @@ void bgsaveCommand(client *c) {
     rdbSaveInfo rsi, *rsiptr;
     rsiptr = rdbPopulateSaveInfo(&rsi);
 
+    // 如果正在执行RDB操作，则退出
     if (server.rdb_child_pid != -1) {
         addReplyError(c,"Background save already in progress");
-    } else if (server.aof_child_pid != -1) {
+    // 如果正在执行AOF操作，需要将BGSAVE提上日程
+    } else if (server.aof_child_pid != -1) {    
         if (schedule) {
             server.rdb_bgsave_scheduled = 1;
             addReplyStatus(c,"Background saving scheduled");
@@ -2427,6 +2459,7 @@ void bgsaveCommand(client *c) {
                 "Use BGSAVE SCHEDULE in order to schedule a BGSAVE whenever "
                 "possible.");
         }
+    // 执行BGSAVE
     } else if (rdbSaveBackground(server.rdb_filename,rsiptr) == C_OK) {
         addReplyStatus(c,"Background saving started");
     } else {
