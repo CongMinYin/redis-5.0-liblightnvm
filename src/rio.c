@@ -58,6 +58,8 @@
 
 static struct nvm_dev *dev = NULL;
 static const struct nvm_geo *geo = NULL;
+static int be_id = NVM_BE_ANY;
+static char nvm_dev_path[NVM_DEV_PATH_LEN] = "/dev/nvme0n1";
 
 /* ------------------------- Buffer I/O implementation ----------------------- */
 
@@ -163,17 +165,14 @@ void rioInitWithFile(rio *r, FILE *fp) {
 /* --------------------- open-channel SSDs I/O implementation ------------------- */
 
 /* Returns 1 or 0 for success/failure. */
-static size_t rioNvmeWrite(rio *r, const void *buf, size_t len) {
+static size_t rioNvmeWrite(rio *r, const void *buff, size_t len) {
     if(dev == NULL){
-        erverLog(LL_NOTICE, "nvme dev is not opened.");
+        serverLog(LL_NOTICE, "nvme dev is not opened.");
     }
-
-    size_t retval;
-    
+    const char *buf = buff;
 	const size_t io_nsectr = nvm_dev_get_ws_opt(dev);       // 获取最佳写入扇区数
     const size_t io_nbyte = io_nsectr * geo->l.nbytes;      // 最佳写入字节数
-	size_t bufs_nbytes = geo->l.nsectr * geo->l.nbytes;     // 一个chunk中的字节数
-    int nchunks = len / bufs_nbytes + 1;
+	//size_t bufs_nbytes = geo->l.nsectr * geo->l.nbytes;     // 一个chunk中的字节数
     //int alignment = dev->geo.sector_nbytes;                 //对齐字节数，如果不对其不知道会怎么样。
 	struct nvm_addr chunk;	                    //1个chunk地址,只有在写一个chunk，重新申请chunk时用到
 	int res = 0;
@@ -186,34 +185,31 @@ static size_t rioNvmeWrite(rio *r, const void *buf, size_t len) {
 
         if(len - buf_ofz < io_nbyte ){
             // 这是多数情况，放在if里，不足最佳写入扇区的先存入buf
-            if(rio->io.nvme.pos + len < io_nbyte){
-                memcpy(rio->io.nvme.buf + rio->io.nvme.pos, buf + buf_ofz, len - buf_ofz);
-                rio->io.nvme.pos += len - buf_ofz;
+            if(r->io.nvme.pos + len < io_nbyte){
+                memcpy(r->io.nvme.buf + r->io.nvme.pos, buf + buf_ofz, len - buf_ofz);
+                r->io.nvme.pos += len - buf_ofz;
             }
             // 数据切割
-            esle{
-                memcpy(rio->io.nvme.buf + rio->io.nvme.pos, buf + buf_ofz, io_nbyte - rio->io.nvme.pos);
+            else{
+                // 写入满的buf到chunk
+                memcpy(r->io.nvme.buf + r->io.nvme.pos, buf + buf_ofz, io_nbyte - r->io.nvme.pos);
                 // 填入这次要写的地址信息，chunk号和扇区号,如果只是写入缓冲区
 		        for (size_t idx = 0; idx < io_nsectr; ++idx) {
 			        src[idx] = r->io.nvme.chunk;	// 0
 			        src[idx].l.sectr = r->io.nvme.sectr + idx;
 		        }
-                res = nvm_cmd_write(dev, src, io_nsectr, rio->io.nvme.buf, NULL, 0x0, NULL);
+                res = nvm_cmd_write(dev, src, io_nsectr, r->io.nvme.buf, NULL, 0x0, NULL);
 
+                //重置buf区
                 memset(r->io.nvme.buf, 0, io_nbyte);
                 // 此处存在恰好写完，0拷贝情况，memcpy不出错，只是不执行
-                memcpy(r->io.nvme.buf, buf + buf_ofz + io_nbyte - rio->io.nvme.pos, len - (buf_ofz + io_nbyte - rio->io.nvme.pos));
-                rio->io.nvme.pos = len - (buf_ofz + io_nbyte - rio->io.nvme.pos);
-                // 填入这次要写的地址信息，chunk号和扇区号,如果只是写入缓冲区
-		        for (size_t idx = 0; idx < io_nsectr; ++idx) {
-			        src[idx] = r->io.nvme.chunk;	// 0
-			        src[idx].l.sectr = r->io.nvme.sectr + idx;
-		        }
-		        res = nvm_cmd_write(dev, src, io_nsectr, buf + buf_ofz, NULL, 0x0, NULL);
+                memcpy(r->io.nvme.buf, buf + buf_ofz + io_nbyte - r->io.nvme.pos, len - (buf_ofz + io_nbyte - r->io.nvme.pos));
+                r->io.nvme.pos = len - (buf_ofz + io_nbyte - r->io.nvme.pos);
                 r->io.nvme.sectr += io_nsectr;
+
                 // chunk已被写满,申请空闲chunk
                 if(r->io.nvme.sectr == geo->l.nsectr){
-                    if (nvm_cmd_rprt_arbs(dev, NVM_CHUNK_STATE_FREE, 1, chunk)) {
+                    if (nvm_cmd_rprt_arbs(dev, NVM_CHUNK_STATE_FREE, 1, &chunk)) {
 		                serverLog(LL_NOTICE, "nvm_cmd_rprt_arbs error, get chunks error.");
 		                return -1;
 	                }
@@ -221,9 +217,6 @@ static size_t rioNvmeWrite(rio *r, const void *buf, size_t len) {
                     r->io.nvme.sectr = 0;
                 }
             }
-            // 剩余部分拷贝到缓冲区
-            memcpy(rio->io.nvme.buf + , buf + buf_ofz, len - buf_ofz);
-            res = nvm_cmd_write(dev, src, io_nsectr, rio->io.nvme.buf, NULL, 0x0, NULL);
         }
         else{
             // 填入这次要写的地址信息，chunk号和扇区号,如果只是写入缓冲区
@@ -233,9 +226,10 @@ static size_t rioNvmeWrite(rio *r, const void *buf, size_t len) {
 		    }
 		    res = nvm_cmd_write(dev, src, io_nsectr, buf + buf_ofz, NULL, 0x0, NULL);
             r->io.nvme.sectr += io_nsectr;
+
             // chunk已被写满,申请空闲chunk
             if(r->io.nvme.sectr == geo->l.nsectr){
-                if (nvm_cmd_rprt_arbs(dev, NVM_CHUNK_STATE_FREE, 1, chunk)) {
+                if (nvm_cmd_rprt_arbs(dev, NVM_CHUNK_STATE_FREE, 1, &chunk)) {
 		            serverLog(LL_NOTICE, "nvm_cmd_rprt_arbs error, get chunks error.");
 		            return -1;
 	            }
@@ -250,45 +244,73 @@ static size_t rioNvmeWrite(rio *r, const void *buf, size_t len) {
 		}
 	}
     
-    return retval;
+    return 0;
 }
 
 /* Returns 1 or 0 for success/failure. */
 static size_t rioNvmeRead(rio *r, void *buf, size_t len) {
     //return fread(buf,len,1,r->io.file.fp);
+    return 0;
 }
 
-/* 返回读写位置，在dev中应该是一个chunk的位置？？？这个函数先放着*/
+ /* 返回读写位置，在dev中应该是一个chunk的位置？？？这个函数先放着*/
 static off_t rioNvmeTell(rio *r) {
     //return ftello(r->io.file.fp);
+    return r->io.nvme.sectr;
 }
 
+static int rioNvmeFlush(rio *r) {
+    //return (fflush(r->io.file.fp) == 0) ? 1 : 0;
+    const size_t io_nsectr = nvm_dev_get_ws_opt(dev);       // 获取最佳写入扇区数
+    //const size_t io_nbyte = io_nsectr * geo->l.nbytes;      // 最佳写入字节数
+    struct nvm_addr src[io_nsectr];	//扇区地址数组
+    int res =0;
 
+    for (size_t idx = 0; idx < io_nsectr; ++idx) {
+			src[idx] = r->io.nvme.chunk;	// 0
+			src[idx].l.sectr = r->io.nvme.sectr + idx;
+	}
+	res = nvm_cmd_write(dev, src, io_nsectr, r->io.nvme.buf, NULL, 0x0, NULL);
+    r->io.nvme.sectr += io_nsectr;
+    if (res < 0) {
+		serverLog(LL_NOTICE, "nvm_cmd_write error.");
+		return -2;
+	}
+
+    // chunk已被写满,申请空闲chunk
+    if(r->io.nvme.sectr == geo->l.nsectr){
+        if (nvm_cmd_rprt_arbs(dev, NVM_CHUNK_STATE_FREE, 1, &r->io.nvme.chunk)) {
+		    serverLog(LL_NOTICE, "nvm_cmd_rprt_arbs error, get chunks error.");
+		    return -1;
+	    }
+        r->io.nvme.sectr = 0;
+    }
+    return 0;
+}
 
 static const rio rioNvmeIO = {
-    rioFileRead,
-    rioFileWrite,
-    rioFileTell,
-    rioFileFlush,
+    rioNvmeRead,
+    rioNvmeWrite,
+    rioNvmeTell,
+    rioNvmeFlush,
     NULL,           /* update_checksum */
     0,              /* current checksum */
     0,              /* bytes read or written */
     0,              /* read/write chunk size */
-    { { NULL, NULL } } /* union for io-specific vars */
+    { {NULL, 0} } /* union for io-specific vars */
 };
 
 void rioInitWithNvme(rio *r) {
-    *r = rioFileIO;
-    if(dev == NULL{
+    *r = rioNvmeIO;
+    if(dev == NULL){
         dev = nvm_dev_openf(nvm_dev_path, be_id);
 	    if (!dev) {
             serverLog(LL_NOTICE, "open open-channel SSDs nvm_dev fail.");
-		    return -1;
 	    }
         else{
             serverLog(LL_NOTICE, "open open-channel SSDs nvm_dev success.");
         }
-    })
+    }
     geo = nvm_dev_get_geo(dev);
     r->io.nvme.dev = dev;    //我觉得还是应该使用全局变量，那好像用不着联合体，先这样用着吧，加了一个buf区，就肯定需要了，前面dev字段是为了多设备考虑。
   
@@ -300,7 +322,10 @@ void rioInitWithNvme(rio *r) {
     r->io.nvme.buf = nvm_buf_alloc(dev, io_nbyte, NULL);  
     memset(r->io.nvme.buf, 0, io_nbyte);
     r->io.nvme.pos = 0;
-    memset(r->io.nvme.chunk, 0, sizeof(struct nvm_addr));
+    //memset(&(r->io.nvme.chunk), 0, sizeof(struct nvm_addr));
+    if (nvm_cmd_rprt_arbs(dev, NVM_CHUNK_STATE_FREE, 1, &r->io.nvme.chunk)){
+		serverLog(LL_NOTICE, "nvm_cmd_rprt_arbs error, get chunks error.");
+	}
     r->io.nvme.sectr = 0;
 }
 
