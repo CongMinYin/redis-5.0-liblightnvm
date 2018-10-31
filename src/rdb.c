@@ -1251,7 +1251,8 @@ int rdbSave(char *filename, rdbSaveInfo *rsi) {
     }
 
     // 将rio对象rdb指向已存在的rio文件对象
-    rioInitWithFile(&rdb,fp);
+    rioInitWithNvme(&rdb);
+    serverLog(LL_NOTICE,"rio nvme dev init success.");
 
     if (server.rdb_save_incremental_fsync)
         rioSetAutoSync(&rdb,REDIS_AUTOSYNC_BYTES);

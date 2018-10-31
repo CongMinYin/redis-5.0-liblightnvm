@@ -1,6 +1,7 @@
 {
     "C_Cpp.errorSquiggles": "Disabled",
     "files.associations": {
-        "zipmap.h": "c"
+        "zipmap.h": "c",
+        "fmacros.h": "c"
     }
 }

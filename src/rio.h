@@ -35,6 +35,8 @@
 #include <stdio.h>
 #include <stdint.h>
 #include "sds.h"
+#include <liblightnvm.h>
+#include <liblightnvm_spec.h>
 
 struct _rio {
     /* Backend functions.
@@ -81,6 +83,14 @@ struct _rio {
             off_t pos;
             sds buf;
         } fdset;
+        /* liblightnvm读写对象 */
+        struct {
+            struct nvm_dev *dev;        // nvme设备
+            void *buf;                  // 缓存区，小写先写入buf，大小为最佳写入扇区大小
+            off_t buf_pos;              // 缓冲区目前写入偏移
+            struct nvm_addr chunk;     // 正在被写入的chunk
+            size_t sectr;           // 指向的扇区写入点
+        }nvme;
     } io;
 };
 
