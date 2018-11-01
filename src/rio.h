@@ -34,9 +34,9 @@
 
 #include <stdio.h>
 #include <stdint.h>
-#include "sds.h"
 #include <liblightnvm.h>
 #include <liblightnvm_spec.h>
+#include "sds.h"
 
 struct _rio {
     /* Backend functions.

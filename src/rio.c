@@ -178,7 +178,7 @@ static size_t rioNvmeWrite(rio *r, const void *buff, size_t len) {
 	int res = 0;
     
     // 循环总长为总的sector数，步长是最佳写入扇区数,充分发挥并行性
-	for (size_t sectr = 0; sectr < (  len / geo->l.nbytes + 1); sectr += io_nsectr) {
+	for (size_t sectr = 0; sectr < (len / geo->l.nbytes + 1); sectr += io_nsectr) {
 		// sec步长与sector的字节相乘，得到最佳写入字节数偏移
 		const size_t buf_ofz = sectr * geo->l.nbytes;
 		struct nvm_addr src[io_nsectr];	//扇区地址数组
