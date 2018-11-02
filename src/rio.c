@@ -168,6 +168,7 @@ void rioInitWithFile(rio *r, FILE *fp) {
 static size_t rioNvmeWrite(rio *r, const void *buff, size_t len) {
     if(dev == NULL){
         serverLog(LL_NOTICE, "nvme dev is not opened.");
+        return 0;
     }
     const char *buf = buff;
 	const size_t io_nsectr = nvm_dev_get_ws_opt(dev);       // 获取最佳写入扇区数
@@ -177,6 +178,7 @@ static size_t rioNvmeWrite(rio *r, const void *buff, size_t len) {
 	struct nvm_addr chunk;	                    //1个chunk地址,只有在写一个chunk，重新申请chunk时用到
 	int res = 0;
     
+    serverLog(LL_NOTICE,"rionvmewrite start write");
     // 循环总长为总的sector数，步长是最佳写入扇区数,充分发挥并行性
 	for (size_t sectr = 0; sectr < (len / geo->l.nbytes + 1); sectr += io_nsectr) {
 		// sec步长与sector的字节相乘，得到最佳写入字节数偏移
@@ -188,6 +190,7 @@ static size_t rioNvmeWrite(rio *r, const void *buff, size_t len) {
             if(r->io.nvme.pos + len < io_nbyte){
                 memcpy(r->io.nvme.buf + r->io.nvme.pos, buf + buf_ofz, len - buf_ofz);
                 r->io.nvme.pos += len - buf_ofz;
+                serverLog(LL_NOTICE,"rionvmewrite to buf");
             }
             // 数据切割
             else{
@@ -211,11 +214,12 @@ static size_t rioNvmeWrite(rio *r, const void *buff, size_t len) {
                 if(r->io.nvme.sectr == geo->l.nsectr){
                     if (nvm_cmd_rprt_arbs(dev, NVM_CHUNK_STATE_FREE, 1, &chunk)) {
 		                serverLog(LL_NOTICE, "nvm_cmd_rprt_arbs error, get chunks error.");
-		                return -1;
+		                return 0;
 	                }
                     r->io.nvme.chunk = chunk;
                     r->io.nvme.sectr = 0;
                 }
+                serverLog(LL_NOTICE,"rionvmewrite data cutting and write down chunk");
             }
         }
         else{
@@ -231,26 +235,27 @@ static size_t rioNvmeWrite(rio *r, const void *buff, size_t len) {
             if(r->io.nvme.sectr == geo->l.nsectr){
                 if (nvm_cmd_rprt_arbs(dev, NVM_CHUNK_STATE_FREE, 1, &chunk)) {
 		            serverLog(LL_NOTICE, "nvm_cmd_rprt_arbs error, get chunks error.");
-		            return -1;
+		            return 0;
 	            }
                 r->io.nvme.chunk = chunk;
                 r->io.nvme.sectr = 0;
             }
+            serverLog(LL_NOTICE,"rionvmewrite write down chunk");
         }
 
 		if (res < 0) {
 			serverLog(LL_NOTICE, "nvm_cmd_write error.");
-			return -2;
+			return 0;
 		}
 	}
-    
-    return 0;
+    serverLog(LL_NOTICE, "run out of rionvmewrite.");
+    return 1;
 }
 
 /* Returns 1 or 0 for success/failure. */
 static size_t rioNvmeRead(rio *r, void *buf, size_t len) {
     //return fread(buf,len,1,r->io.file.fp);
-    return 0;
+    return 1;
 }
 
  /* 返回读写位置，在dev中应该是一个chunk的位置？？？这个函数先放着*/
@@ -259,6 +264,8 @@ static off_t rioNvmeTell(rio *r) {
     return r->io.nvme.sectr;
 }
 
+/* Flushes any buffer to target device if applicable. Returns 1 on success
+ * and 0 on failures. */
 static int rioNvmeFlush(rio *r) {
     //return (fflush(r->io.file.fp) == 0) ? 1 : 0;
     const size_t io_nsectr = nvm_dev_get_ws_opt(dev);       // 获取最佳写入扇区数
@@ -274,18 +281,18 @@ static int rioNvmeFlush(rio *r) {
     r->io.nvme.sectr += io_nsectr;
     if (res < 0) {
 		serverLog(LL_NOTICE, "nvm_cmd_write error.");
-		return -2;
+		return 0;
 	}
 
     // chunk已被写满,申请空闲chunk
     if(r->io.nvme.sectr == geo->l.nsectr){
         if (nvm_cmd_rprt_arbs(dev, NVM_CHUNK_STATE_FREE, 1, &r->io.nvme.chunk)) {
 		    serverLog(LL_NOTICE, "nvm_cmd_rprt_arbs error, get chunks error.");
-		    return -1;
+		    return 0;
 	    }
         r->io.nvme.sectr = 0;
     }
-    return 0;
+    return 1;
 }
 
 static const rio rioNvmeIO = {

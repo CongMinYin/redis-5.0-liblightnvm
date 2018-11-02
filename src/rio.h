@@ -38,6 +38,7 @@
 #include <liblightnvm_spec.h>
 #include "sds.h"
 
+
 struct _rio {
     /* Backend functions.
      * Since this functions do not tolerate short writes or reads the return
@@ -106,6 +107,7 @@ static inline size_t rioWrite(rio *r, const void *buf, size_t len) {
         if (r->update_cksum) r->update_cksum(r,buf,bytes_to_write);
         if (r->write(r,buf,bytes_to_write) == 0)
             return 0;
+        printf("riowrite success\n");
         buf = (char*)buf + bytes_to_write;
         len -= bytes_to_write;
         r->processed_bytes += bytes_to_write;

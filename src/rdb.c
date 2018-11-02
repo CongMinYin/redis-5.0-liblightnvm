@@ -75,8 +75,10 @@ void rdbCheckThenExit(int linenum, char *reason, ...) {
 }
 
 static int rdbWriteRaw(rio *rdb, void *p, size_t len) {
+    serverLog(LL_NOTICE, "rdbwriteraw .");
     if (rdb && rioWrite(rdb,p,len) == 0)
         return -1;
+    serverLog(LL_NOTICE, "rdbwriteraw success.");
     return len;
 }
 
@@ -1119,7 +1121,9 @@ int rdbSaveRio(rio *rdb, int *error, int flags, rdbSaveInfo *rsi) {
     if (server.rdb_checksum)
         rdb->update_cksum = rioGenericUpdateChecksum;
     snprintf(magic,sizeof(magic),"REDIS%04d",RDB_VERSION);
+    serverLog(LL_NOTICE,"start write");
     if (rdbWriteRaw(rdb,magic,9) == -1) goto werr;
+    serverLog(LL_NOTICE,"write success");
     // 将rdb文件的默认信息写入rio中
     if (rdbSaveInfoAuxFields(rdb,flags,rsi) == -1) goto werr;
 
@@ -1231,13 +1235,13 @@ werr: /* Write error. */
 /* Save the DB on disk. Return C_ERR on error, C_OK on success. */
 /* 保存数据库到磁盘，返回C_ERR或C_OK */
 int rdbSave(char *filename, rdbSaveInfo *rsi) {
-    char tmpfile[256];
-    char cwd[MAXPATHLEN]; /* Current working dir path for error messages. */
-    FILE *fp;
+    //char tmpfile[256];
+    //char cwd[MAXPATHLEN]; /* Current working dir path for error messages. */
+    //FILE *fp;
     rio rdb;
     int error = 0;
 
-    snprintf(tmpfile,256,"temp-%d.rdb", (int) getpid());
+    /*snprintf(tmpfile,256,"temp-%d.rdb", (int) getpid());
     fp = fopen(tmpfile,"w");
     if (!fp) {
         char *cwdp = getcwd(cwd,MAXPATHLEN);
@@ -1248,15 +1252,16 @@ int rdbSave(char *filename, rdbSaveInfo *rsi) {
             cwdp ? cwdp : "unknown",
             strerror(errno));
         return C_ERR;
-    }
+    }*/
 
     // 将rio对象rdb指向已存在的rio文件对象
     rioInitWithNvme(&rdb);
     serverLog(LL_NOTICE,"rio nvme dev init success.");
 
+    /*
     if (server.rdb_save_incremental_fsync)
         rioSetAutoSync(&rdb,REDIS_AUTOSYNC_BYTES);
-
+    */
     // 持久化rio操作，传入rio文件对象
     if (rdbSaveRio(&rdb,&error,RDB_SAVE_NONE,rsi) == C_ERR) {
         errno = error;
@@ -1265,14 +1270,15 @@ int rdbSave(char *filename, rdbSaveInfo *rsi) {
 
     /* Make sure data will not remain on the OS's output buffers */
     // 文件操作，确保文件不在缓冲区，而是写到磁盘
-    if (fflush(fp) == EOF) goto werr;
+    /*if (fflush(fp) == EOF) goto werr;
     if (fsync(fileno(fp)) == -1) goto werr;
     if (fclose(fp) == EOF) goto werr;
+    */
 
     /* Use RENAME to make sure the DB file is changed atomically only
      * if the generate DB file is ok. */
     // 使用RENAME确保仅在生成DB文件正常时才自动更改DB文件
-    if (rename(tmpfile,filename) == -1) {
+    /*if (rename(tmpfile,filename) == -1) {
         char *cwdp = getcwd(cwd,MAXPATHLEN);
         serverLog(LL_WARNING,
             "Error moving temp DB file %s on the final "
@@ -1283,7 +1289,7 @@ int rdbSave(char *filename, rdbSaveInfo *rsi) {
             strerror(errno));
         unlink(tmpfile);
         return C_ERR;
-    }
+    }*/
 
     serverLog(LL_NOTICE,"DB saved on disk");
     server.dirty = 0;
@@ -1293,8 +1299,8 @@ int rdbSave(char *filename, rdbSaveInfo *rsi) {
 
 werr:
     serverLog(LL_WARNING,"Write error saving DB on disk: %s", strerror(errno));
-    fclose(fp);
-    unlink(tmpfile);
+    //fclose(fp);
+    //unlink(tmpfile);
     return C_ERR;
 }
 
