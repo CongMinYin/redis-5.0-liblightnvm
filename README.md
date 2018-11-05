@@ -411,6 +411,7 @@ Other C files
 * `dict.c` is an implementation of a non-blocking hash table which rehashes incrementally.
 * `scripting.c` implements Lua scripting. It is completely self contained from the rest of the Redis implementation and is simple enough to understand if you are familar with the Lua API.
 * `cluster.c` implements the Redis Cluster. Probably a good read only after being very familiar with the rest of the Redis code base. If you want to read `cluster.c` make sure to read the [Redis Cluster specification][3].
+* `insertkv` is a shell script to insert key-value pair into redis.
 
 [3]: http://redis.io/topics/cluster-spec
 

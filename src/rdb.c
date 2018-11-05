@@ -1256,7 +1256,6 @@ int rdbSave(char *filename, rdbSaveInfo *rsi) {
 
     // 将rio对象rdb指向已存在的rio文件对象
     rioInitWithNvme(&rdb);
-    serverLog(LL_NOTICE,"rio nvme dev init success.");
 
     /*
     if (server.rdb_save_incremental_fsync)
@@ -1274,6 +1273,11 @@ int rdbSave(char *filename, rdbSaveInfo *rsi) {
     if (fsync(fileno(fp)) == -1) goto werr;
     if (fclose(fp) == EOF) goto werr;
     */
+    // 
+    if(rioFlush(&rdb) == 0){
+        serverLog(LL_NOTICE, "rio nvme Flush fail");
+        goto werr;
+    }
 
     /* Use RENAME to make sure the DB file is changed atomically only
      * if the generate DB file is ok. */
