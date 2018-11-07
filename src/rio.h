@@ -38,6 +38,13 @@
 #include <liblightnvm_spec.h>
 #include "sds.h"
 
+struct _file_nvme {
+    char filename[16];
+    size_t len;                     //size_t上限4G,需要验证一下,如果是4G,根据一个地址索引一个最佳写入扇区，则需要128k索引地址，2^17 x 8 x 4x2^10 = 4G
+    struct nvm_addr index[2048];    //先用数组试试，不行就用malloc,计算是64bit=8byte 8x2048=16k
+};
+
+typedef struct _file_nvme file_nvme;
 
 struct _rio {
     /* Backend functions.
@@ -88,9 +95,10 @@ struct _rio {
         struct {
             struct nvm_dev *dev;        // nvme设备
             char *buf;                  // 缓存区，小写先写入buf，大小为最佳写入扇区大小
-            off_t pos;              // 缓冲区目前写入偏移
-            struct nvm_addr chunk;     // 正在被写入的chunk
-            size_t sectr;           // 指向的扇区写入点
+            off_t pos;                  // 缓冲区目前写入偏移
+            struct nvm_addr chunk;      // 正在被写入的chunk
+            size_t sectr;               // 指向的扇区写入点
+            file_nvme *file;            // 指向正在写的文件
         }nvme;
     } io;
 };
@@ -107,7 +115,6 @@ static inline size_t rioWrite(rio *r, const void *buf, size_t len) {
         if (r->update_cksum) r->update_cksum(r,buf,bytes_to_write);
         if (r->write(r,buf,bytes_to_write) == 0)
             return 0;
-        printf("riowrite success\n");
         buf = (char*)buf + bytes_to_write;
         len -= bytes_to_write;
         r->processed_bytes += bytes_to_write;

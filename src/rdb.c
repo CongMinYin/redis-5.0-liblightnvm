@@ -32,7 +32,7 @@
  * 
  */
 
-#include "server.h"
+#include "server.h" // 包含rio.h
 #include "lzf.h"    /* LZF compression library */
 #include "zipmap.h"
 #include "endianconv.h"
@@ -75,10 +75,8 @@ void rdbCheckThenExit(int linenum, char *reason, ...) {
 }
 
 static int rdbWriteRaw(rio *rdb, void *p, size_t len) {
-    serverLog(LL_NOTICE, "rdbwriteraw .");
     if (rdb && rioWrite(rdb,p,len) == 0)
         return -1;
-    serverLog(LL_NOTICE, "rdbwriteraw success.");
     return len;
 }
 
@@ -1121,9 +1119,7 @@ int rdbSaveRio(rio *rdb, int *error, int flags, rdbSaveInfo *rsi) {
     if (server.rdb_checksum)
         rdb->update_cksum = rioGenericUpdateChecksum;
     snprintf(magic,sizeof(magic),"REDIS%04d",RDB_VERSION);
-    serverLog(LL_NOTICE,"start write");
     if (rdbWriteRaw(rdb,magic,9) == -1) goto werr;
-    serverLog(LL_NOTICE,"write success");
     // 将rdb文件的默认信息写入rio中
     if (rdbSaveInfoAuxFields(rdb,flags,rsi) == -1) goto werr;
 
@@ -1278,6 +1274,9 @@ int rdbSave(char *filename, rdbSaveInfo *rsi) {
         serverLog(LL_NOTICE, "rio nvme Flush fail");
         goto werr;
     }
+    else{
+        serverLog(LL_NOTICE, "rio nvme flush success");
+    }
 
     /* Use RENAME to make sure the DB file is changed atomically only
      * if the generate DB file is ok. */
@@ -1308,7 +1307,7 @@ werr:
     return C_ERR;
 }
 
-// 后台执行RBD持久化BGSAVE操作
+// 后台执行RBD持久化BGSAVE操作，创建子进程，计算速率等
 int rdbSaveBackground(char *filename, rdbSaveInfo *rsi) {
     pid_t childpid;
     long long start;
@@ -2438,7 +2437,7 @@ void saveCommand(client *c) {
 }
 
 /* BGSAVE [SCHEDULE] */
-// BGSAVE命令实现
+// BGSAVE命令实现，当年持久化执行情况，是否执行
 void bgsaveCommand(client *c) {
     int schedule = 0;
 
@@ -2470,7 +2469,7 @@ void bgsaveCommand(client *c) {
                 "Use BGSAVE SCHEDULE in order to schedule a BGSAVE whenever "
                 "possible.");
         }
-    // 执行BGSAVE
+    // 执行BGSAVE，文件名字估计是配置文件读起来的，因此rdb文件应该只有一份，写了新的就会废除旧的
     } else if (rdbSaveBackground(server.rdb_filename,rsiptr) == C_OK) {
         addReplyStatus(c,"Background saving started");
     } else {
