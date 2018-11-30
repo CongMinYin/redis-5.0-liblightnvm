@@ -1251,7 +1251,7 @@ int rdbSave(char *filename, rdbSaveInfo *rsi) {
     }*/
 
     // 将rio对象rdb指向已存在的rio文件对象
-    rioInitWithNvme(&rdb);
+    rioInitWithNvme(&rdb, RIO_NVME_WRITE);
 
     /*
     if (server.rdb_save_incremental_fsync)
@@ -1891,6 +1891,7 @@ int rdbLoadRio(rio *rdb, rdbSaveInfo *rsi, int loading_aof) {
 
     rdb->update_cksum = rdbLoadProgressCallback;
     rdb->max_processing_chunk = server.loading_process_events_interval_bytes;
+    // 先读文件头，校验
     if (rioRead(rdb,buf,9) == 0) goto eoferr;
     buf[9] = '\0';
     if (memcmp(buf,"REDIS",5) != 0) {
@@ -2109,7 +2110,13 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi) {
 
     if ((fp = fopen(filename,"r")) == NULL) return C_ERR;
     startLoading(fp);
-    rioInitWithFile(&rdb,fp);
+    //rioInitWithFile(&rdb,fp);
+    serverLog(LL_NOTICE, "rdbLoad:rdb load.");
+    rioInitWithNvme(&rdb, RIO_NVME_READ);
+    if(rdbLoadFileMeta(&rdb)){
+        serverLog(LL_NOTICE, "rdbLoad:can not load rdb_meta_file.");
+        return 0;
+    }
     retval = rdbLoadRio(&rdb,rsi,0);
     fclose(fp);
     stopLoading();

@@ -288,6 +288,7 @@ int startAppendOnly(void) {
  * is likely to fail. However apparently in modern systems this is no longer
  * true, and in general it looks just more resilient to retry the write. If
  * there is an actual error condition we'll get it at the next try. */
+/*
 ssize_t aofWrite(int fd, const char *buf, size_t len) {
     ssize_t nwritten = 0, totwritten = 0;
 
@@ -308,6 +309,7 @@ ssize_t aofWrite(int fd, const char *buf, size_t len) {
 
     return totwritten;
 }
+*/
 
 /* Write the append only file buffer on disk.
  *
@@ -328,26 +330,34 @@ ssize_t aofWrite(int fd, const char *buf, size_t len) {
  * However if force is set to 1 we'll write regardless of the background
  * fsync. */
 #define AOF_WRITE_LOG_ERROR_RATE 30 /* Seconds between errors logging. */
+// force参数为1时，为强制同步
 void flushAppendOnlyFile(int force) {
     ssize_t nwritten;
     int sync_in_progress = 0;
     mstime_t latency;
 
-    if (sdslen(server.aof_buf) == 0) return;
+    // if (sdslen(server.aof_buf) == 0) return;
+    // 小于4k也直接返回，保证整写，去除写放大，提高性能
+    if (sdslen(server.aof_buf) < 4096) return;
 
+    // 是否有aof操作在后台执行
     if (server.aof_fsync == AOF_FSYNC_EVERYSEC)
         sync_in_progress = bioPendingJobsOfType(BIO_AOF_FSYNC) != 0;
 
+    // 同步策略是每秒一次，且不是强制同步
     if (server.aof_fsync == AOF_FSYNC_EVERYSEC && !force) {
         /* With this append fsync policy we do background fsyncing.
          * If the fsync is still in progress we can try to delay
          * the write for a couple of seconds. */
+        // 如果后台正在同步，postponed意思是延期，缓办
         if (sync_in_progress) {
+            // 延迟执行flush操作的开始时间为0，表示之前没有延迟过write
             if (server.aof_flush_postponed_start == 0) {
                 /* No previous write postponing, remember that we are
                  * postponing the flush and return. */
                 server.aof_flush_postponed_start = server.unixtime;
                 return;
+            // 如果后台正在同步，延迟过write操作，但是时间没有超过2s，直接返回
             } else if (server.unixtime - server.aof_flush_postponed_start < 2) {
                 /* We were already waiting for fsync to finish, but for less
                  * than two seconds this is still ok. Postpone again. */
@@ -355,6 +365,7 @@ void flushAppendOnlyFile(int force) {
             }
             /* Otherwise fall trough, and go write since we can't wait
              * over two seconds. */
+            // 到了这里，表示之前延迟过write操作，后台正在同步，而且时间已经超过了2s，执行write操作，write会被阻塞？
             server.aof_delayed_fsync++;
             serverLog(LL_NOTICE,"Asynchronous AOF fsync is taking too long (disk is busy?). Writing the AOF buffer without waiting for fsync to complete, this may slow down Redis.");
         }
@@ -364,9 +375,11 @@ void flushAppendOnlyFile(int force) {
      * While this will save us against the server being killed I don't think
      * there is much to do about the whole server stopping for power problems
      * or alike */
-
+    // 计算时间，并写入文件,残留的4k尾巴在函数尾部出处理
     latencyStartMonitor(latency);
-    nwritten = aofWrite(server.aof_fd,server.aof_buf,sdslen(server.aof_buf));
+    //nwritten = aofWrite(server.aof_fd,server.aof_buf,sdslen(server.aof_buf));
+    aofWriteNvme(server.aof_buf, sdslen(server.aof_buf));
+    serverLog(LL_NOTICE, "write length = %lu", sdslen(server.aof_buf));
     latencyEndMonitor(latency);
     /* We want to capture different events for delayed writes:
      * when the delay happens with a pending fsync, or with a saving child
@@ -385,6 +398,7 @@ void flushAppendOnlyFile(int force) {
     /* We performed the write so reset the postponed flush sentinel to zero. */
     server.aof_flush_postponed_start = 0;
 
+    // 如果写入长度和缓冲区长度不一致，出错
     if (nwritten != (ssize_t)sdslen(server.aof_buf)) {
         static time_t last_write_error_log = 0;
         int can_log = 0;
@@ -461,20 +475,31 @@ void flushAppendOnlyFile(int force) {
 
     /* Re-use AOF buffer when it is small enough. The maximum comes from the
      * arena size of 4k minus some overhead (but is otherwise arbitrary). */
+    // 如果比较小就清空，再使用，比较大就释放了再申请
+    /*
     if ((sdslen(server.aof_buf)+sdsavail(server.aof_buf)) < 4000) {
         sdsclear(server.aof_buf);
     } else {
         sdsfree(server.aof_buf);
         server.aof_buf = sdsempty();
+    }*/
+    //处理尾巴,按照原先的思想，先释放再用新的，这里是先申请新的再释放，再指向
+    if(sdslen(server.aof_buf) % 4096 != 0){
+        sds temp_buf = sdsempty();
+        sdscatlen(temp_buf, server.aof_buf + sdslen(server.aof_buf) - (sdslen(server.aof_buf) % 4096), sdslen(server.aof_buf) % 4096);
+        sdsfree(server.aof_buf);
+        server.aof_buf = temp_buf;
     }
 
     /* Don't fsync if no-appendfsync-on-rewrite is set to yes and there are
      * children doing I/O in the background. */
+    // 正在执行重写，BGSAVE BGAOFWRITE 则不同步
     if (server.aof_no_fsync_on_rewrite &&
         (server.aof_child_pid != -1 || server.rdb_child_pid != -1))
             return;
 
     /* Perform the fsync if needed. */
+    // 开始同步
     if (server.aof_fsync == AOF_FSYNC_ALWAYS) {
         /* redis_fsync is defined as fdatasync() for Linux in order to avoid
          * flushing metadata. */
@@ -485,7 +510,7 @@ void flushAppendOnlyFile(int force) {
         server.aof_last_fsync = server.unixtime;
     } else if ((server.aof_fsync == AOF_FSYNC_EVERYSEC &&
                 server.unixtime > server.aof_last_fsync)) {
-        if (!sync_in_progress) aof_background_fsync(server.aof_fd);
+        if (!sync_in_progress) aof_background_fsync(server.aof_fd);     //如果设置1s执行一次，则应该是这句话
         server.aof_last_fsync = server.unixtime;
     }
 }
@@ -703,6 +728,8 @@ int loadAppendOnlyFile(char *filename) {
 
     /* Check if this AOF file has an RDB preamble. In that case we need to
      * load the RDB file and later continue loading the AOF tail. */
+    /* 如果AOF文件有一个RDB文件的前序，我们需要先加载RDB文件
+      */
     char sig[5]; /* "REDIS" */
     if (fread(sig,1,5,fp) != 5 || memcmp(sig,"REDIS",5) != 0) {
         /* No RDB preamble, seek back at 0 offset. */

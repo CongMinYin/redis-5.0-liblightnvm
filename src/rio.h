@@ -38,13 +38,39 @@
 #include <liblightnvm_spec.h>
 #include "sds.h"
 
+#define RIO_NVME_WRITE 1
+#define RIO_NVME_READ 2
+
+//1048576=1024x1024  1M
+#define INDEX_CHUNKN 256 
+
 struct _file_nvme {
     char filename[16];
-    size_t len;                     //size_t上限4G,需要验证一下,如果是4G,根据一个地址索引一个最佳写入扇区，则需要128k索引地址，2^17 x 8 x 4x2^10 = 4G
-    struct nvm_addr index[2048];    //先用数组试试，不行就用malloc,计算是64bit=8byte 8x2048=16k
+    size_t len;                     
+    struct nvm_addr index[INDEX_CHUNKN];     //先用数组试试，不行就用malloc,记录每个chunk的地址就可以了，不需要记录sector，由长度控制
+    struct nvm_addr aof_chunk_head;         //RDB持久化之后进入aof增量式保存形式，保存的是首个chunk地址，后续在每个sector记录信息
+    uint64_t crc;
 };
 
 typedef struct _file_nvme file_nvme;
+
+struct _aof_io {
+    struct nvm_dev *dev;        // nvme设备
+    char *buf;                  // 缓存区，读写共用（因为不可能同时读写，仅在程序启动时读取），大小为最佳写入扇区大小
+    off_t pos;                  // 缓冲区目前写入偏移
+    struct nvm_addr chunk;      // 正在被写入的chunk
+    size_t sectr;               // 下一个扇区
+};
+
+typedef struct _aof_io aof_io;
+
+// 不能手算这个结构长度，一定要用sizeof
+struct _aof_sec_head {  
+    struct nvm_addr next_chunk_head;    //下一个chunk的地址
+    uint64_t crc;                       //CRC校验主要用来判断当前sector是否有效
+};
+
+typedef struct _aof_sec_head aof_sec_head;
 
 struct _rio {
     /* Backend functions.
@@ -94,10 +120,10 @@ struct _rio {
         /* liblightnvm读写对象 */
         struct {
             struct nvm_dev *dev;        // nvme设备
-            char *buf;                  // 缓存区，小写先写入buf，大小为最佳写入扇区大小
+            char *buf;                  // 缓存区，读写共用（因为不可能同时读写，仅在程序启动时读取），大小为最佳写入扇区大小
             off_t pos;                  // 缓冲区目前写入偏移
             struct nvm_addr chunk;      // 正在被写入的chunk
-            size_t sectr;               // 指向的扇区写入点
+            size_t sectr;               // 下一个写的扇区
             file_nvme *file;            // 指向正在写的文件
         }nvme;
     } io;
@@ -111,26 +137,28 @@ typedef struct _rio rio;
 
 static inline size_t rioWrite(rio *r, const void *buf, size_t len) {
     while (len) {
+        //写的字节长度，不能超过每次写的最大字节长度
         size_t bytes_to_write = (r->max_processing_chunk && r->max_processing_chunk < len) ? r->max_processing_chunk : len;
         if (r->update_cksum) r->update_cksum(r,buf,bytes_to_write);
-        if (r->write(r,buf,bytes_to_write) == 0)
+        if (r->write(r,buf,bytes_to_write) == 0)    // 调用自身write方法
             return 0;
-        buf = (char*)buf + bytes_to_write;
-        len -= bytes_to_write;
-        r->processed_bytes += bytes_to_write;
+        buf = (char*)buf + bytes_to_write;          // 更新偏移量，指向下一个读的位置
+        len -= bytes_to_write;                      // 计算剩余写入长度
+        r->processed_bytes += bytes_to_write;       // 更新写入长度
     }
     return 1;
 }
 
 static inline size_t rioRead(rio *r, void *buf, size_t len) {
     while (len) {
+        //读的字节长度，不能超过每次读的最大字节长度
         size_t bytes_to_read = (r->max_processing_chunk && r->max_processing_chunk < len) ? r->max_processing_chunk : len;
-        if (r->read(r,buf,bytes_to_read) == 0)
+        if (r->read(r,buf,bytes_to_read) == 0)     // 调用自身read方法
             return 0;
         if (r->update_cksum) r->update_cksum(r,buf,bytes_to_read);
-        buf = (char*)buf + bytes_to_read;
-        len -= bytes_to_read;
-        r->processed_bytes += bytes_to_read;
+        buf = (char*)buf + bytes_to_read;           // 更新偏移量，指向下一个读的位置
+        len -= bytes_to_read;                       // 计算剩余读入长度
+        r->processed_bytes += bytes_to_read;        // 更新读取长度
     }
     return 1;
 }
@@ -146,7 +174,11 @@ static inline int rioFlush(rio *r) {
 void rioInitWithFile(rio *r, FILE *fp);
 void rioInitWithBuffer(rio *r, sds s);
 void rioInitWithFdset(rio *r, int *fds, int numfds);
-void rioInitWithNvme(rio *r);
+void rioInitWithNvme(rio *r, int rw);
+
+int rdbLoadFileMeta(rio *r); 
+
+ssize_t aofWriteNvme(const char *buf, size_t len);
 
 void rioFreeFdset(rio *r);
 

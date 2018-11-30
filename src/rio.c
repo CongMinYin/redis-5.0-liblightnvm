@@ -61,6 +61,119 @@ static const struct nvm_geo *geo = NULL;
 static int be_id = NVM_BE_ANY;
 static char nvm_dev_path[NVM_DEV_PATH_LEN] = "/dev/nvme0n1";
 
+/* ------------------------- open-channel SSDs data management implementation ----------------------- */
+/* ------------------------- 设计地正常些，精巧写，不想写垃圾代码，不想制造学术垃圾 ----------------------- */
+
+/* 全局变量表示rdb文件，生存周期持续整个redis运行期间
+ * 因为是redis启动的时候加载rdb文件，所以必须持久化，之前只需要一个文件名就可以，现在需要把数据结构持久化下去
+ * 仅此一份，可以看成单例，但没做特殊处理
+ */
+static file_nvme rdb_file_nvme = {
+    "rdb_file_nvme",    // 文件名字
+    0,                  // 文件长度
+};
+
+// AOF状态结构
+static aof_io aofNvmeIo = {
+    NULL,
+    NULL,
+    0
+};
+/* 全局变量表示aof文件，生存周期持续整个redis运行期间
+ * 因为aof操作都在aof.c，所以所有操作都用都过rio.h的接口实现
+ * 仅此一份，可以看成单例，但没做特殊处理
+ */
+/* 
+static file_nvme aof_file_nvme = {
+    "aof_file_nvme",    // 文件名字
+    0,                  // 文件长度
+};
+*/
+/* ------------------------- open-channel SSDs AOF interface  implementation ----------------------- */
+
+/* aof不需要像rdb一样管理缓冲区，每次检查前一个chunk是否写完，写完就申请新的，没写完，就顺着前一个sector写下一个sector 
+ * 现在有个问题，考虑宕机，aof元数据不能在关机推出系统再写，而是每次aof追加的时候都写入元数据到硬盘，数据写到ocssd，这样并行，但是还是两次IO
+ * 如果是元数据写到数据尾部，采用类似结构的链式指针效果，可以减少1次IO，只需要存头地址就可以，这样可以作为可以说的一个点，数据安全和一致性
+ * RDBFlush结束的时候，末尾写入AOF起始chunk地址，后面每次AOF的sector写入，在末尾8个字节，记录下一个sector的地址
+ * 这样会加快AOF的持久化速率，可能会降低AOF的灾难恢复速率，利大于弊
+ * 改了一下设计方案，每次aof持久化都持久化一次元数据太垃圾了设计了，两次IO
+ * 这样设计，每个chunk的的每个sector起始8字节记录当前sector是否是AOF文件内容，chunk最后一个sector的起始8个字节记录下一个chunk的地址
+ * 
+ * 再修改一下，这个为最终版，改为每次像RDB一样写入最佳写入扇区，允许丢失这么多数据，1个扇区虽然丢失率低，但是性能低很多
+ * 假装一下只会丢4k，假装每次写入是1～最佳写入扇区的范围，实际上就是最佳写入扇区
+ * 每个最佳写入扇区的头部16个字节 记录当前的chunk信息和crc，主要用crc判断当前chunk是否有效，chunk的最后一个最佳写入扇区记录下一个chunk的信息和crc
+ */
+ssize_t aofWriteNvme(const char *buf, size_t len) {
+    if(dev == NULL){
+        serverLog(LL_NOTICE, "rioNvmeWrite:nvme dev is not opened.");
+        return 0;
+    }
+
+    ssize_t totwritten = 0;
+	const size_t io_nsectr = nvm_dev_get_ws_opt(dev);       // 获取最佳写入扇区数
+    const size_t io_nbyte = io_nsectr * geo->l.nbytes;      // 最佳写入字节数
+	struct nvm_addr chunk;                                  // 这里必须要临时变量保存一下了，因为需要先申请下一个chunk才能填入信息，再写下去
+    int res = 0;
+
+    while(len > 0) {
+	    struct nvm_addr src[io_nsectr];	//扇区地址数组
+        // 这是多数情况，放在if里，不足最佳写入扇区的先存入buf,不足这个
+        // 这里不取等号是因为让这种情况进入else，将缓冲区持久化
+        if(aofNvmeIo.pos + len < io_nbyte){
+            memcpy(aofNvmeIo.buf + aofNvmeIo.pos, buf, len);
+            aofNvmeIo.pos += len;
+            //serverLog(LL_NOTICE,"rionvmewrite to buf");
+            totwritten += len;
+            len = 0;
+        }
+        // 数据切割，也可能是不切割刚刚好，反正都是要写下去的
+        else{
+            // chunk已被写满,申请空闲chunk
+            if(aofNvmeIo.sectr + io_nsectr == geo->l.nsectr){
+                if (nvm_cmd_rprt_arbs(dev, NVM_CHUNK_STATE_FREE, 1, &chunk)) {
+		            serverLog(LL_NOTICE, "aofNvmeWrite:nvm_cmd_rprt_arbs error, get chunks error.");
+		            return 0;
+                }
+                aof_sec_head t;
+                t.next_chunk_head = chunk;
+                t.crc =  crc64(t.crc, (unsigned char *)&t.next_chunk_head, sizeof(t.next_chunk_head));
+                memcpy(aofNvmeIo.buf, &t, sizeof(t));   // 替换掉原本的头部信息
+	        }
+
+            // 写入满的buf到chunk
+            memcpy(aofNvmeIo.buf + aofNvmeIo.pos, buf, io_nbyte - aofNvmeIo.pos);
+            len -= io_nbyte - aofNvmeIo.pos;
+            buf += io_nbyte - aofNvmeIo.pos;
+            totwritten += io_nbyte - aofNvmeIo.pos;
+            // 填入这次要写的地址信息，chunk号和扇区号,如果只是写入缓冲区
+		    for (size_t idx = 0; idx < io_nsectr; ++idx) {
+			    src[idx] =aofNvmeIo.chunk;	
+			    src[idx].l.sectr = aofNvmeIo.sectr + idx;
+		    }
+            res = nvm_cmd_write(dev, src, io_nsectr, aofNvmeIo.buf, NULL, 0x0, NULL);
+            
+            // 重置buf区
+            memset(aofNvmeIo.buf + sizeof(aof_sec_head), 0, io_nbyte - sizeof(aof_sec_head));
+            aofNvmeIo.pos = sizeof(aof_sec_head);
+            aofNvmeIo.sectr += io_nsectr;
+
+            // chunk已被写满,申请空闲chunk
+            if(aofNvmeIo.sectr == geo->l.nsectr){
+                aofNvmeIo.chunk = chunk;
+                aofNvmeIo.sectr = 0;
+	        }
+        }
+
+		if (res < 0) {
+			serverLog(LL_NOTICE, "rioNvmeWrite:nvm_cmd_write error.");
+			return 0;
+		}
+	}
+
+    return totwritten;
+}
+
+
 /* ------------------------- Buffer I/O implementation ----------------------- */
 
 /* Returns 1 or 0 for success/failure. */
@@ -167,100 +280,57 @@ void rioInitWithFile(rio *r, FILE *fp) {
 /* Returns 1 or 0 for success/failure. */
 static size_t rioNvmeWrite(rio *r, const void *buff, size_t len) {
     if(dev == NULL){
-        serverLog(LL_NOTICE, "nvme dev is not opened.");
+        serverLog(LL_NOTICE, "rioNvmeWrite:nvme dev is not opened.");
         return 0;
     }
     const char *buf = buff;
 	const size_t io_nsectr = nvm_dev_get_ws_opt(dev);       // 获取最佳写入扇区数
     const size_t io_nbyte = io_nsectr * geo->l.nbytes;      // 最佳写入字节数
-	//size_t bufs_nbytes = geo->l.nsectr * geo->l.nbytes;     // 一个chunk中的字节数
-    //int alignment = dev->geo.sector_nbytes;                 //对齐字节数，如果不对其不知道会怎么样。
-	struct nvm_addr chunk;	                    //1个chunk地址,只有在写一个chunk，重新申请chunk时用到
 	int res = 0;
     
     //serverLog(LL_NOTICE,"rionvmewrite start write");
-    // 循环总长为总的sector数，步长是最佳写入扇区数,充分发挥并行性，这种写入方式，同一个chunk内的地址会连续记录在文件中
-    int flag = 0;   // 判断是否恰好一个整的写入数量，不是整的除法+1
-    if((len % geo->l.nbytes) != 0){
-        flag = 1; 
+	struct nvm_addr src[io_nsectr];	//扇区地址数组
+    // 这是多数情况，放在if里，不足最佳写入扇区的先存入buf
+    // 这里不取等号是因为让这种情况进入else，将缓冲区持久化
+    if(r->io.nvme.pos + len < io_nbyte){
+        memcpy(r->io.nvme.buf + r->io.nvme.pos, buf, len);
+        r->io.nvme.pos += len;
+        //serverLog(LL_NOTICE,"rionvmewrite to buf");
     }
-    // 一般情况是只循环一次，写入缓冲区，写满后else切割写入chunk，基本不存在循环两次及以上的情况，因为都是小写
-	for (size_t sectr = 0; sectr < (len / geo->l.nbytes + flag); sectr += io_nsectr) {
-		// sec步长与sector的字节相乘，得到最佳写入字节数起始地址偏移，一般情况下是只循环一次是0,主要作用是控制多次循环的情况，否则没有用
-		const size_t buf_ofz = sectr * geo->l.nbytes;
-		struct nvm_addr src[io_nsectr];	//扇区地址数组
+    // 数据切割，也可能是不切割刚刚好，反正都是要写下去的
+    else{
+        // 写入满的buf到chunk
+        memcpy(r->io.nvme.buf + r->io.nvme.pos, buf, io_nbyte - r->io.nvme.pos);
+        // 填入这次要写的地址信息，chunk号和扇区号,如果只是写入缓冲区
+		for (size_t idx = 0; idx < io_nsectr; ++idx) {
+			src[idx] = r->io.nvme.chunk;	
+			src[idx].l.sectr = r->io.nvme.sectr + idx;
+		}
+        res = nvm_cmd_write(dev, src, io_nsectr, r->io.nvme.buf, NULL, 0x0, NULL);
+        //r->io.nvme.file->index[r->io.nvme.file->len / io_nbyte] = src[0];   // 整写，结构赋值，将一个步长为最佳写入扇区的首地址结构赋值给索引
+        r->io.nvme.file->len += io_nbyte; // 记录的是文件实际长度
+        serverLog(LL_NOTICE,"rioNvmeWrite:rionvmewrite write down chunk：file_index=%lu, file_len=%lu, chunk_head_sec_addr:%u %u %u %u", r->io.nvme.file->len / io_nbyte -1, \
+            r->io.nvme.file->len, src[0].l.pugrp, src[0].l.punit, src[0].l.chunk, src[0].l.sectr);         // 输出信息，后期注释掉
 
-        // 这里逻辑有问题，必须先经过缓存，避免顺序混乱
-        //if(len - buf_ofz < io_nbyte ){    // 比它大的也要经过缓存，会走数据切割那一条路，不能直接去写一整个，不然会跳过缓存的内容，导致顺序错误
-            // 这是多数情况，放在if里，不足最佳写入扇区的先存入buf
-            if(r->io.nvme.pos + len - buf_ofz < io_nbyte){
-                memcpy(r->io.nvme.buf + r->io.nvme.pos, buf + buf_ofz, len - buf_ofz);
-                r->io.nvme.pos += len - buf_ofz;
-                //serverLog(LL_NOTICE,"rionvmewrite to buf");
-            }
-            // 数据切割，也可能是不切割刚刚好，反正是要写下去的
-            else{
-                // 写入满的buf到chunk
-                memcpy(r->io.nvme.buf + r->io.nvme.pos, buf + buf_ofz, io_nbyte - r->io.nvme.pos);
-                // 填入这次要写的地址信息，chunk号和扇区号,如果只是写入缓冲区
-		        for (size_t idx = 0; idx < io_nsectr; ++idx) {
-			        src[idx] = r->io.nvme.chunk;	// 0
-			        src[idx].l.sectr = r->io.nvme.sectr + idx;
-		        }
-                res = nvm_cmd_write(dev, src, io_nsectr, r->io.nvme.buf, NULL, 0x0, NULL);
+        // 重置buf区
+        memset(r->io.nvme.buf, 0, io_nbyte);
+        // 此处存在恰好写完，0拷贝情况，memcpy不出错，只是不执行
+        memcpy(r->io.nvme.buf, buf + io_nbyte - r->io.nvme.pos, len - (io_nbyte - r->io.nvme.pos));
+        r->io.nvme.pos = len - (io_nbyte - r->io.nvme.pos);
+        r->io.nvme.sectr += io_nsectr;
 
-                // 更新文件信息，记录追加的地址信息和长度，先判断是否超过文件最大长度
-                if((r->io.nvme.file->len + io_nbyte) / 2 > ~0UL / 2){
-                    serverLog(LL_NOTICE, "rdb file bigger than 4G, error.");
-                    return 0;
-                }
-                r->io.nvme.file->len += io_nbyte; // 记录的是文件实际长度
-                r->io.nvme.file->index[r->io.nvme.file->len / io_nbyte -1] = src[0];   // 整写，结构赋值，将一个步长为最佳写入扇区的首地址结构赋值给索引
-                serverLog(LL_NOTICE,"rionvmewrite write down chunk：file_index=%lu, file_len=%lu, chunk_head_sec_addr:%u %u %u %u", r->io.nvme.file->len / io_nbyte -1, \
-                    r->io.nvme.file->len, src[0].l.pugrp, src[0].l.punit, src[0].l.chunk, src[0].l.sectr);         // 输出信息，后期注释掉
-
-                // 重置buf区
-                memset(r->io.nvme.buf, 0, io_nbyte);
-                // 此处存在恰好写完，0拷贝情况，memcpy不出错，只是不执行
-                memcpy(r->io.nvme.buf, buf + buf_ofz + io_nbyte - r->io.nvme.pos, len - (buf_ofz + io_nbyte - r->io.nvme.pos));
-                r->io.nvme.pos = len - (buf_ofz + io_nbyte - r->io.nvme.pos);
-                r->io.nvme.sectr += io_nsectr;
-
-                // chunk已被写满,申请空闲chunk
-                if(r->io.nvme.sectr == geo->l.nsectr){
-                    if (nvm_cmd_rprt_arbs(dev, NVM_CHUNK_STATE_FREE, 1, &chunk)) {
-		                serverLog(LL_NOTICE, "nvm_cmd_rprt_arbs error, get chunks error.");
-		                return 0;
-	                }
-                    r->io.nvme.chunk = chunk;
-                    r->io.nvme.sectr = 0;
-                }
-            }
-       /* }
-        // 这个if else不对，如果加了这个，如果大写入，直接没经过缓存会跳乱顺序，但是正常情况下也不会走到这个else里
-        else{
-            // 填入这次要写的地址信息，chunk号和扇区号,如果只是写入缓冲区
-		    for (size_t idx = 0; idx < io_nsectr; ++idx) {
-			    src[idx] = r->io.nvme.chunk;	// 0
-			    src[idx].l.sectr = r->io.nvme.sectr + idx;
-		    }
-		    res = nvm_cmd_write(dev, src, io_nsectr, buf + buf_ofz, NULL, 0x0, NULL);
-            r->io.nvme.sectr += io_nsectr;
-
-            // chunk已被写满,申请空闲chunk
-            if(r->io.nvme.sectr == geo->l.nsectr){
-                if (nvm_cmd_rprt_arbs(dev, NVM_CHUNK_STATE_FREE, 1, &chunk)) {
-		            serverLog(LL_NOTICE, "nvm_cmd_rprt_arbs error, get chunks error.");
-		            return 0;
-	            }
-                r->io.nvme.chunk = chunk;
-                r->io.nvme.sectr = 0;
-            }
-            serverLog(LL_NOTICE,"rionvmewrite write down chunk");
-        }*/
+        // chunk已被写满,申请空闲chunk
+        if(r->io.nvme.sectr == geo->l.nsectr){
+            if (nvm_cmd_rprt_arbs(dev, NVM_CHUNK_STATE_FREE, 1, &r->io.nvme.chunk)) {
+		        serverLog(LL_NOTICE, "rioNvmeWrite:nvm_cmd_rprt_arbs error, get chunks error.");
+		        return 0;
+	        } 
+            r->io.nvme.sectr = 0;
+            r->io.nvme.file->index[(r->io.nvme.file->len+len) / geo->l.nsectr / io_nbyte] =  r->io.nvme.chunk; 
+        }
 
 		if (res < 0) {
-			serverLog(LL_NOTICE, "nvm_cmd_write error.");
+			serverLog(LL_NOTICE, "rioNvmeWrite:nvm_cmd_write error.");
 			return 0;
 		}
 	}
@@ -269,55 +339,148 @@ static size_t rioNvmeWrite(rio *r, const void *buff, size_t len) {
 }
 
 /* Returns 1 or 0 for success/failure. */
-static size_t rioNvmeRead(rio *r, void *buf, size_t len) {
+static size_t rioNvmeRead(rio *r, void *buff, size_t len) {
     //return fread(buf,len,1,r->io.file.fp);
+    if(dev == NULL){
+        serverLog(LL_NOTICE, "rioNvmeRead:nvme dev is not opened.");
+        return 0;
+    }
+    char * buf = (char *)buff;
+	const size_t io_nsectr = nvm_dev_get_ws_opt(dev);       // 获取最佳读取扇区数
+    const size_t io_nbyte = io_nsectr * geo->l.nbytes;      // 最佳读取字节数
+	int res = 0;
+
+    //serverLog(LL_NOTICE,"rionvmewrite start write");
+	struct nvm_addr src[io_nsectr];	//扇区地址数组
+    // 这是多数情况，放在if里，不足最佳写入扇区的先存入buf
+    // 这里不取等号是因为让这种情况进入else，从OCSSD读取缓冲区大小的数据
+    if(r->io.nvme.pos + len < io_nbyte){
+        memcpy(buf, r->io.nvme.buf + r->io.nvme.pos, len);
+        r->io.nvme.pos += len;
+        //serverLog(LL_NOTICE,"rionvmewrite to buf");
+    }
+    // 数据切割，也可能是不切割刚刚好,就是if的=号情况，反正是要写下去的
+    else{
+        // 剩余部分先拷贝到buf
+        memcpy(buf, r->io.nvme.buf + r->io.nvme.pos, io_nbyte - r->io.nvme.pos);
+
+        // 填入这次要写的地址信息，chunk号和扇区号,如果只是写入缓冲区
+		for (size_t idx = 0; idx < io_nsectr; ++idx) {
+			src[idx] = r->io.nvme.chunk;	
+			src[idx].l.sectr = r->io.nvme.sectr + idx;
+		}
+        res = nvm_cmd_read(dev, src, io_nsectr, r->io.nvme.buf, NULL, 0x0, NULL);
+        //serverLog(LL_NOTICE,"rioNvmeRead:rioNvmeRead read down chunk：file_index=%lu, file_len=%lu, chunk_head_sec_addr:%u %u %u %u", r->io.nvme.file->len / io_nbyte -1, r->io.nvme.file->len, src[0].l.pugrp, src[0].l.punit, src[0].l.chunk, src[0].l.sectr);         // 输出信息，后期注释掉
+
+        // 此处存在恰好读完，不继续拷贝情况，memcpy不出错，只是不执行
+        memcpy(buf + io_nbyte - r->io.nvme.pos, r->io.nvme.buf, len - (io_nbyte - r->io.nvme.pos));
+        r->io.nvme.pos = len - (io_nbyte - r->io.nvme.pos);
+        r->io.nvme.sectr += io_nsectr;
+
+        // chunk已被读取结束，准备下一个chunk的读取工作
+        if(r->io.nvme.sectr == geo->l.nsectr){
+            r->io.nvme.chunk = rdb_file_nvme.index[r->processed_bytes+len / io_nbyte];  //从这里看，没必要记录每断sector步长的首地址，记录chunk首地址就可以了
+            r->io.nvme.sectr = 0; 
+        }
+        if (res < 0) {
+			serverLog(LL_NOTICE, "rioNvmeRead:nvm_cmd_read error.");
+			return 0;
+		}
+    }
     return 1;
 }
 
  /* 返回读写位置，在dev中应该是一个chunk的位置？？？这个函数先放着*/
 static off_t rioNvmeTell(rio *r) {
     //return ftello(r->io.file.fp);
-    return r->io.nvme.sectr;
+    return r->processed_bytes;
 }
 
 /* Flushes any buffer to target device if applicable. Returns 1 on success
  * and 0 on failures. */
 static int rioNvmeFlush(rio *r) {
-    // 缓冲区没有数据，不需要写回，如果有，也肯定不是整的最佳写入扇区的字节数，不然会在写入就被写下去
-    if (r->io.nvme.pos == 0){
-        return 1;
+    if(dev == NULL){
+        serverLog(LL_NOTICE, "rioNvmeWrite:nvme dev is not opened.");
+        return 0;
     }
     const size_t io_nsectr = nvm_dev_get_ws_opt(dev);       // 获取最佳写入扇区数
-    const size_t io_nbyte = io_nsectr * geo->l.nbytes;      // 最佳写入字节数
+    //const size_t io_nbyte = io_nsectr * geo->l.nbytes;      // 最佳写入字节数
     struct nvm_addr src[io_nsectr];	//扇区地址数组
+    uint64_t crc = 0;
     int res =0;
 
+    // 缓冲区没有数据，不需要写回，如果有，也肯定不是整的最佳写入扇区的字节数，不然会在写入就被写下去
+    // 不能直接返回，要将文件元数据持久化下去，改为跳转语句
+    if (r->io.nvme.pos == 0){
+        goto OUT;
+    }
+    
     for (size_t idx = 0; idx < io_nsectr; ++idx) {
-			src[idx] = r->io.nvme.chunk;	// 0
+            src[idx] = r->io.nvme.chunk;	// 0
 			src[idx].l.sectr = r->io.nvme.sectr + idx;
 	}
 	res = nvm_cmd_write(dev, src, io_nsectr, r->io.nvme.buf, NULL, 0x0, NULL);
     r->io.nvme.sectr += io_nsectr;
     if (res < 0) {
-		serverLog(LL_NOTICE, "nvm_cmd_write error.");
+		serverLog(LL_NOTICE, "rioNvmeFlush:nvm_cmd_write error.");
 		return 0;
 	}
 
-    // 更新文件信息，记录追加的地址信息和长度，先判断是否超过文件最大长度
-    if((r->io.nvme.file->len + io_nbyte) / 2 > ~0UL / 2){
-        serverLog(LL_NOTICE, "rdb file bigger than 4G, error.");
-        return 0;
-    }
     r->io.nvme.file->len += r->io.nvme.pos; // 记录的是文件实际长度
-    r->io.nvme.file->index[r->io.nvme.file->len / io_nbyte] = src[0];   // 文件末尾，数据不是整的，不需要再次判断是否有余数情况，结构赋值，将一个步长为最佳写入扇区的首地址结构赋值给索引
+    //r->io.nvme.file->index[r->io.nvme.file->len / io_nbyte] = src[0];   // 文件末尾，数据不是整的，不需要再次判断是否有余数情况，结构赋值，将一个步长为最佳写入扇区的首地址结构赋值给索引
+    serverLog(LL_NOTICE, "rioNvmeFlush:file_len=%lu processed_bytes=%lu", rdb_file_nvme.len, r->processed_bytes);
 
-    // chunk已被写满,申请空闲chunk
-    if(r->io.nvme.sectr == geo->l.nsectr){
-        if (nvm_cmd_rprt_arbs(dev, NVM_CHUNK_STATE_FREE, 1, &r->io.nvme.chunk)) {
-		    serverLog(LL_NOTICE, "nvm_cmd_rprt_arbs error, get chunks error.");
-		    return 0;
-	    }
-        r->io.nvme.sectr = 0;
+OUT:
+    // 为AOF持久化到open-channel SSD预申请一个chunk
+    if (nvm_cmd_rprt_arbs(dev, NVM_CHUNK_STATE_FREE, 1, &rdb_file_nvme.aof_chunk_head)) {
+	    serverLog(LL_NOTICE, "rioNvmeFlush:nvm_cmd_rprt_arbs error, get chunks error.");
+	    return 0;
+	}
+    aofNvmeIo.chunk = rdb_file_nvme.aof_chunk_head;
+    aof_sec_head t;
+    t.next_chunk_head = aofNvmeIo.chunk;
+    t.crc =  crc64(t.crc, (unsigned char *)&t.next_chunk_head, sizeof(t.next_chunk_head));
+    memcpy(aofNvmeIo.buf, &t, sizeof(t));
+    aofNvmeIo.pos += sizeof(t);
+
+    /* 将rdbfile元数据写到磁盘上，暂时先写到普通硬盘文件上，采用crc校验是否正确
+     */
+    FILE *rdb_file_fp;
+    if((rdb_file_fp = fopen("rdb_meta_file", "w+")) == NULL) { //w+表示可读可写，后续可以改成r，b表示二进制，之前都没有加b，就不加了，因为不是一行一行读写，所以好像都一样
+        serverLog(LL_NOTICE, "rioNvmeFlush:can not create rdb_meta_file.");
+    }
+    if(fwrite(&rdb_file_nvme, sizeof(rdb_file_nvme), 1, rdb_file_fp) == 0){
+        serverLog(LL_NOTICE, "rioNvmeFlush:can not write down rdb_meta_file.");
+    }
+    
+    rdb_file_nvme.crc =  crc64(crc, (unsigned char *)&rdb_file_nvme, sizeof(rdb_file_nvme) - 8);
+    serverLog(LL_NOTICE, "rioNvmeFlush:write down rdb_meta_file successful, w_crc = %lu.", rdb_file_nvme.crc);
+    
+    // 这部分代码检验一遍，如果正确则注释掉，最好的方法是在rdb_file_fp最后一个字段设置crc校验，暂且不用做吧，会
+    if(fread(&rdb_file_nvme, sizeof(rdb_file_nvme), 1, rdb_file_fp) == 0){
+        serverLog(LL_NOTICE, "rioNvmeFlush:can not read rdb_meta_file.");
+    }
+    crc =  crc64(crc, (unsigned char *)&rdb_file_nvme, sizeof(rdb_file_nvme) - 8);
+    serverLog(LL_NOTICE, "rioNvmeFlush:read rdb_meta_file successful, r_crc = %lu.", crc);
+
+    return 1;
+}
+
+int rdbLoadFileMeta(rio *r){
+    r->io.nvme.file = &rdb_file_nvme;
+    FILE *rdb_file_fp;
+    if((rdb_file_fp = fopen("rdb_meta_file", "r")) == NULL){ 
+        serverLog(LL_NOTICE, "rdbLoadFileMeta:can not open rdb_meta_file.");
+    }
+    if(fread(&rdb_file_nvme, sizeof(rdb_file_nvme), 1, rdb_file_fp) == 0){
+        serverLog(LL_NOTICE, "rdbLoadFileMeta:can not read rdb_meta_file.");
+    }
+
+    uint64_t crc = 0;
+    crc =  crc64(crc, (unsigned char *)&rdb_file_nvme, sizeof(rdb_file_nvme) - 8);
+    if(crc != rdb_file_nvme.crc){
+        serverLog(LL_NOTICE, "rdbLoadFileMeta:crc check is error.");
+        return 0;
     }
     return 1;
 }
@@ -331,29 +494,10 @@ static const rio rioNvmeIO = {
     0,              /* current checksum */
     0,              /* bytes read or written */
     0,              /* read/write chunk size */
-    { {NULL, 0} } /* union for io-specific vars */
+    { {NULL, 0} }   /* union for io-specific vars */
 };
 
-/* 全局变量表示rdb文件，生存周期持续整个redis运行期间
- * 掉电丢失，目前尚未做持久化，后续考虑
- * 仅此一份，可以看成单例，但没做特殊处理
- */
-static file_nvme rdb_file_nvme = {
-    "rdb_file_nvme",    // 文件名字
-    0,                  // 文件长度
-};
-
-/* 全局变量表示rdb文件，生存周期持续整个redis运行期间
- * 掉电丢失，目前尚未做持久化，后续考虑
- * 仅此一份，可以看成单例，但没做特殊处理
- */
-/*
-static file_nvme aof_file_nvme = {
-    "aof_file_nvme",    // 文件名字
-    0,                  // 文件长度
-};*/
-
-void rioInitWithNvme(rio *r) {
+void rioInitWithNvme(rio *r, int rw) {
     *r = rioNvmeIO;     // 赋值操作，前面也是，都是声明为const类型，然后进行赋值操作
     if(dev == NULL){
         dev = nvm_dev_openf(nvm_dev_path, be_id);
@@ -372,24 +516,59 @@ void rioInitWithNvme(rio *r) {
     //每次先往buf写，如果写满buf，则刷下去，直至一次rdb结束，则强制刷回buf
     const size_t io_nsectr = nvm_dev_get_ws_opt(dev);       // 获取最佳写入扇区数
     const size_t io_nbyte = io_nsectr * geo->l.nbytes;
-    r->io.nvme.buf = nvm_buf_alloc(dev, io_nbyte, NULL);  
-    memset(r->io.nvme.buf, 0, io_nbyte);
-    r->io.nvme.pos = 0;
-    //memset(&(r->io.nvme.chunk), 0, sizeof(struct nvm_addr));
-    if (nvm_cmd_rprt_arbs(dev, NVM_CHUNK_STATE_FREE, 1, &r->io.nvme.chunk)){
-		serverLog(LL_NOTICE, "nvm_cmd_rprt_arbs error, get chunks error.");
+    r->max_processing_chunk = io_nbyte;
+
+    if(r->io.nvme.buf != NULL){
+        nvm_buf_free(dev, r->io.nvme.buf);   // 不知道能不能保证结构体初始化为空或者后续有无篡改，释放后重新申请比较安全。
+    }
+    r->io.nvme.buf = nvm_buf_alloc(dev, io_nbyte, NULL); 
+    if (!r->io.nvme.buf) {
+		NVM_DEBUG("FAILED: allocating bufs");
+		return ;
 	}
-    r->io.nvme.sectr = 0;
+    memset(r->io.nvme.buf, 0, io_nbyte);
+    
+    if(rw == RIO_NVME_WRITE){
+        r->io.nvme.pos = 0;
+        //memset(&(r->io.nvme.chunk), 0, sizeof(struct nvm_addr));
+        if (nvm_cmd_rprt_arbs(dev, NVM_CHUNK_STATE_FREE, 1, &r->io.nvme.chunk)){
+		    serverLog(LL_NOTICE, "nvm_cmd_rprt_arbs error, get chunks error.");
+	    }
+        r->io.nvme.sectr = 0;
+
+        // 初始化文件相关，具体文件内容的校验可以通过get来校验，这里如果做整体的校验也更好
+        rdb_file_nvme.len = 0;
+        rdb_file_nvme.crc = 0;
+        memset(&rdb_file_nvme.aof_chunk_head, 0, sizeof(rdb_file_nvme.aof_chunk_head));    //aof地址置0
+        memset(&rdb_file_nvme.index, 0, sizeof(rdb_file_nvme.index));    //地址数组置全部0
+        rdb_file_nvme.index[0] = r->io.nvme.chunk;  // 已经申请了第一个chunk地址，赋值
+        serverLog(LL_NOTICE, "sizeof(rdb_file_nvme.index) = %lu.", sizeof(rdb_file_nvme.index));    //看是否正确，正确删
+    }
+    else{
+        r->io.nvme.pos = io_nbyte;
+        r->io.nvme.chunk = rdb_file_nvme.index[0];
+        r->io.nvme.sectr = 0;   
+    }
     r->io.nvme.file = &rdb_file_nvme; // 文件指向
 
-    // 初始化文件相关
-    rdb_file_nvme.len = 0;
-    memset(rdb_file_nvme.index, 0, sizeof(rdb_file_nvme.index));    //地址数组置全部0
-    serverLog(LL_NOTICE, "sizeof(rdb_file_nvme.index) = %lu.", sizeof(rdb_file_nvme.index));    //看是否正确，正确删
+    // 初始化AOF状态结构，AOF接续在RDB之后
+    aofNvmeIo.dev = dev;
+    aofNvmeIo.buf = nvm_buf_alloc(dev, io_nbyte, NULL); 
+    if (!aofNvmeIo.buf) {
+		NVM_DEBUG("FAILED: allocating bufs");
+		return ;
+	}
+    aofNvmeIo.pos = 0;
+    memset(&aofNvmeIo.chunk, 0, sizeof(aofNvmeIo.chunk));
+    aofNvmeIo.sectr = 0;
+
+    /* 这里还应该有删除之前的rdb文件信息，擦除chunk等操作
+     * 不过鉴于系统重启失效，暂时不写，看看需不需要
+     */
 
     // 输出基本信息
     serverLog(LL_NOTICE, "nvme ocssd optimum sector:%lu",io_nsectr);
-    serverLog(LL_NOTICE, "nvme ocssd max file len:%lu",~0UL);
+    //serverLog(LL_NOTICE, "nvme ocssd max file len:%lu",~0UL);
 }
 
 /* ------------------- File descriptors set implementation ------------------- */
