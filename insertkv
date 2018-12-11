@@ -1,5 +1,5 @@
 #!/bin/bash
-for i in `seq 10000`
+for i in `seq 100000`
 do 
-echo -en "helloword" | /usr/local/bin/redis-cli -x set name$i >> redis.log
+echo -en "qwertyuiopasdfghjklzxcvbnm" | /usr/local/bin/redis-cli -x set name$i >> redis.log
 done 

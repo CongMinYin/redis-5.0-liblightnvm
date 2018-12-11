@@ -3845,13 +3845,17 @@ int checkForSentinelMode(int argc, char **argv) {
 
 /* Function called at startup to load RDB or AOF file in memory. */
 void loadDataFromDisk(void) {
+    return ;
+    serverLog(LL_NOTICE, "*************loadDataFromDisk***************");
     long long start = ustime();
     if (server.aof_state == AOF_ON) {
         if (loadAppendOnlyFile(server.aof_filename) == C_OK)
             serverLog(LL_NOTICE,"DB loaded from append only file: %.3f seconds",(float)(ustime()-start)/1000000);
     } else {
+        // rdb meta data exist?
         rdbSaveInfo rsi = RDB_SAVE_INFO_INIT;
-        if (rdbLoad(server.rdb_filename,&rsi) == C_OK) {
+        int r = rdbLoad(server.rdb_filename,&rsi);
+        if ( r == C_OK) {
             serverLog(LL_NOTICE,"DB loaded from disk: %.3f seconds",
                 (float)(ustime()-start)/1000000);
 
@@ -3872,7 +3876,10 @@ void loadDataFromDisk(void) {
                 replicationCacheMasterUsingMyself();
                 selectDb(server.cached_master,rsi.repl_stream_db);
             }
-        } else if (errno != ENOENT) {
+        }else if (r == 1){
+            serverLog(LL_NOTICE, "rdb file not exist");
+            return ;
+        }else if (errno != ENOENT) {
             serverLog(LL_WARNING,"Fatal error loading the DB: %s. Exiting.",strerror(errno));
             exit(1);
         }

@@ -1298,6 +1298,17 @@ int rdbSave(char *filename, rdbSaveInfo *rsi) {
     server.dirty = 0;
     server.lastsave = time(NULL);
     server.lastbgsave_status = C_OK;
+
+    serverLog(LL_NOTICE, "**************RDB LOAD TEST**************");
+    rdbSaveInfo rsi_load = RDB_SAVE_INFO_INIT;
+    long long start = ustime();
+    if (rdbLoad(server.rdb_filename,&rsi_load) == C_OK) {
+        serverLog(LL_NOTICE, "rdb load success, it takes %llu us", ustime() - start);
+    } 
+    else{
+        serverLog(LL_NOTICE, "rdb load fail");
+    }
+
     return C_OK;
 
 werr:
@@ -1335,7 +1346,10 @@ int rdbSaveBackground(char *filename, rdbSaveInfo *rsi) {
          * 这里如果要直接写到ocssd，需要调用liblightnvm库，直接写入到chunk中
          * 因为没有文件概念，需要组织地址空间，能写入，也能正确加载
          */
+        long long s = ustime();
         retval = rdbSave(filename,rsi);
+        long long e = ustime();
+        serverLog(LL_NOTICE, "difference = %llu", e-s);
         if (retval == C_OK) {
             size_t private_dirty = zmalloc_get_private_dirty(-1);
 
@@ -1837,17 +1851,17 @@ robj *rdbLoadObject(int rdbtype, rio *rdb) {
 /* Mark that we are loading in the global state and setup the fields
  * needed to provide loading stats. */
 void startLoading(FILE *fp) {
-    struct stat sb;
+    //struct stat sb;
 
     /* Load the DB */
     server.loading = 1;
     server.loading_start_time = time(NULL);
     server.loading_loaded_bytes = 0;
-    if (fstat(fileno(fp), &sb) == -1) {
+    /*if (fstat(fileno(fp), &sb) == -1) {
         server.loading_total_bytes = 0;
     } else {
         server.loading_total_bytes = sb.st_size;
-    }
+    }*/
 }
 
 /* Refresh the loading progress info */
@@ -1884,6 +1898,7 @@ void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
 /* Load an RDB file from the rio stream 'rdb'. On success C_OK is returned,
  * otherwise C_ERR is returned and 'errno' is set accordingly. */
 int rdbLoadRio(rio *rdb, rdbSaveInfo *rsi, int loading_aof) {
+    serverLog(LL_NOTICE, "rdb load rio.");
     uint64_t dbid;
     int type, rdbver;
     redisDb *db = server.db+0;
@@ -1910,6 +1925,7 @@ int rdbLoadRio(rio *rdb, rdbSaveInfo *rsi, int loading_aof) {
     long long lru_idle = -1, lfu_freq = -1, expiretime = -1, now = mstime();
     long long lru_clock = LRU_CLOCK();
     
+    serverLog(LL_NOTICE, "start while");
     while(1) {
         robj *key, *val;
 
@@ -2073,6 +2089,8 @@ int rdbLoadRio(rio *rdb, rdbSaveInfo *rsi, int loading_aof) {
         lfu_freq = -1;
         lru_idle = -1;
     }
+
+    serverLog(LL_NOTICE, "end while");
     /* Verify the checksum if RDB version is >= 5 */
     if (rdbver >= 5) {
         uint64_t cksum, expected = rdb->cksum;
@@ -2104,21 +2122,25 @@ eoferr: /* unexpected end of file is handled here with a fatal exit */
  * If you pass an 'rsi' structure initialied with RDB_SAVE_OPTION_INIT, the
  * loading code will fiil the information fields in the structure. */
 int rdbLoad(char *filename, rdbSaveInfo *rsi) {
-    FILE *fp;
+    //FILE *fp;
     rio rdb;
     int retval;
 
-    if ((fp = fopen(filename,"r")) == NULL) return C_ERR;
-    startLoading(fp);
+    //if ((fp = fopen(filename,"r")) == NULL) return C_ERR;
+    startLoading(NULL);
     //rioInitWithFile(&rdb,fp);
     serverLog(LL_NOTICE, "rdbLoad:rdb load.");
     rioInitWithNvme(&rdb, RIO_NVME_READ);
+    serverLog(LL_NOTICE, "rdbLoad:init nvme.");
     if(rdbLoadFileMeta(&rdb)){
         serverLog(LL_NOTICE, "rdbLoad:can not load rdb_meta_file.");
-        return 0;
+        stopLoading();
+        return 1;
+    }else{
+        serverLog(LL_NOTICE, "rdbLoad:load file meta ok.");
     }
     retval = rdbLoadRio(&rdb,rsi,0);
-    fclose(fp);
+    //fclose(fp);
     stopLoading();
     return retval;
 }

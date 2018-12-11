@@ -378,7 +378,7 @@ void flushAppendOnlyFile(int force) {
     // 计算时间，并写入文件,残留的4k尾巴在函数尾部出处理
     latencyStartMonitor(latency);
     //nwritten = aofWrite(server.aof_fd,server.aof_buf,sdslen(server.aof_buf));
-    aofWriteNvme(server.aof_buf, sdslen(server.aof_buf));
+    nwritten = aofWriteNvme(server.aof_buf, sdslen(server.aof_buf));
     serverLog(LL_NOTICE, "write length = %lu", sdslen(server.aof_buf));
     latencyEndMonitor(latency);
     /* We want to capture different events for delayed writes:
