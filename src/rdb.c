@@ -1274,9 +1274,9 @@ int rdbSave(char *filename, rdbSaveInfo *rsi) {
         serverLog(LL_NOTICE, "rio nvme Flush fail");
         goto werr;
     }
-    else{
+    /*(else{
         serverLog(LL_NOTICE, "rio nvme flush success");
-    }
+    }*/
 
     /* Use RENAME to make sure the DB file is changed atomically only
      * if the generate DB file is ok. */
@@ -1294,11 +1294,12 @@ int rdbSave(char *filename, rdbSaveInfo *rsi) {
         return C_ERR;
     }*/
 
-    serverLog(LL_NOTICE,"DB saved on disk");
+    //serverLog(LL_NOTICE,"DB saved on disk");
     server.dirty = 0;
     server.lastsave = time(NULL);
     server.lastbgsave_status = C_OK;
 
+    /*
     serverLog(LL_NOTICE, "**************RDB LOAD TEST**************");
     rdbSaveInfo rsi_load = RDB_SAVE_INFO_INIT;
     long long start = ustime();
@@ -1308,7 +1309,7 @@ int rdbSave(char *filename, rdbSaveInfo *rsi) {
     else{
         serverLog(LL_NOTICE, "rdb load fail");
     }
-
+    */
     return C_OK;
 
 werr:
@@ -1349,7 +1350,7 @@ int rdbSaveBackground(char *filename, rdbSaveInfo *rsi) {
         long long s = ustime();
         retval = rdbSave(filename,rsi);
         long long e = ustime();
-        serverLog(LL_NOTICE, "difference = %llu", e-s);
+        serverLog(LL_NOTICE, "DB save on disk: %llu us", e-s);
         if (retval == C_OK) {
             size_t private_dirty = zmalloc_get_private_dirty(-1);
 
@@ -1898,7 +1899,6 @@ void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
 /* Load an RDB file from the rio stream 'rdb'. On success C_OK is returned,
  * otherwise C_ERR is returned and 'errno' is set accordingly. */
 int rdbLoadRio(rio *rdb, rdbSaveInfo *rsi, int loading_aof) {
-    serverLog(LL_NOTICE, "rdb load rio.");
     uint64_t dbid;
     int type, rdbver;
     redisDb *db = server.db+0;
@@ -1925,7 +1925,6 @@ int rdbLoadRio(rio *rdb, rdbSaveInfo *rsi, int loading_aof) {
     long long lru_idle = -1, lfu_freq = -1, expiretime = -1, now = mstime();
     long long lru_clock = LRU_CLOCK();
     
-    serverLog(LL_NOTICE, "start while");
     while(1) {
         robj *key, *val;
 
@@ -2090,7 +2089,6 @@ int rdbLoadRio(rio *rdb, rdbSaveInfo *rsi, int loading_aof) {
         lru_idle = -1;
     }
 
-    serverLog(LL_NOTICE, "end while");
     /* Verify the checksum if RDB version is >= 5 */
     if (rdbver >= 5) {
         uint64_t cksum, expected = rdb->cksum;
@@ -2129,19 +2127,21 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi) {
     //if ((fp = fopen(filename,"r")) == NULL) return C_ERR;
     startLoading(NULL);
     //rioInitWithFile(&rdb,fp);
-    serverLog(LL_NOTICE, "rdbLoad:rdb load.");
-    rioInitWithNvme(&rdb, RIO_NVME_READ);
-    serverLog(LL_NOTICE, "rdbLoad:init nvme.");
+
     if(rdbLoadFileMeta(&rdb)){
         serverLog(LL_NOTICE, "rdbLoad:can not load rdb_meta_file.");
         stopLoading();
         return 1;
-    }else{
-        serverLog(LL_NOTICE, "rdbLoad:load file meta ok.");
     }
+    /*else{
+        serverLog(LL_NOTICE, "rdbLoad:load file meta ok.");
+    }*/
+    rioInitWithNvme(&rdb, RIO_NVME_READ);
+    
     retval = rdbLoadRio(&rdb,rsi,0);
     //fclose(fp);
     stopLoading();
+    serverLog(LL_NOTICE, "rdb load data byte = %lu", rdb.processed_bytes);
     return retval;
 }
 

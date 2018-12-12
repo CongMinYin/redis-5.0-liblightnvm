@@ -3845,8 +3845,8 @@ int checkForSentinelMode(int argc, char **argv) {
 
 /* Function called at startup to load RDB or AOF file in memory. */
 void loadDataFromDisk(void) {
-    return ;
-    serverLog(LL_NOTICE, "*************loadDataFromDisk***************");
+    //return ;
+    //serverLog(LL_NOTICE, "*************loadDataFromDisk***************");
     long long start = ustime();
     if (server.aof_state == AOF_ON) {
         if (loadAppendOnlyFile(server.aof_filename) == C_OK)
@@ -3856,8 +3856,9 @@ void loadDataFromDisk(void) {
         rdbSaveInfo rsi = RDB_SAVE_INFO_INIT;
         int r = rdbLoad(server.rdb_filename,&rsi);
         if ( r == C_OK) {
-            serverLog(LL_NOTICE,"DB loaded from disk: %.3f seconds",
-                (float)(ustime()-start)/1000000);
+            serverLog(LL_NOTICE,"DB loaded from disk: %llu us",(ustime()-start));
+            /*serverLog(LL_NOTICE,"DB loaded from disk: %.3f seconds",
+                (float)(ustime()-start)/1000000);*/
 
             /* Restore the replication ID / offset from the RDB file. */
             if (server.masterhost &&

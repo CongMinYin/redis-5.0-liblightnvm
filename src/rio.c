@@ -283,7 +283,7 @@ static size_t rioNvmeWrite(rio *r, const void *buff, size_t len) {
         serverLog(LL_NOTICE, "rioNvmeWrite:nvme dev is not opened.");
         return 0;
     }
-    uint64_t crc = 0;
+    //uint64_t crc = 0;
     const char *buf = buff;
 	const size_t io_nsectr = nvm_dev_get_ws_opt(dev);       // 获取最佳写入扇区数
     const size_t io_nbyte = io_nsectr * geo->l.nbytes;      // 最佳写入字节数
@@ -293,13 +293,12 @@ static size_t rioNvmeWrite(rio *r, const void *buff, size_t len) {
 	struct nvm_addr src[io_nsectr];	//扇区地址数组
     // 这是多数情况，放在if里，不足最佳写入扇区的先存入buf
     // 这里不取等号是因为让这种情况进入else，将缓冲区持久化
-    static int testnum = 0;
+    //static int test_write_num = 0;
     if(r->io.nvme.pos + len < io_nbyte){
         memcpy(r->io.nvme.buf + r->io.nvme.pos, buf, len);
         r->io.nvme.pos += len;
         //crc = crc64(crc, (unsigned char *)(r->io.nvme.buf), io_nbyte);
-        //serverLog(LL_NOTICE,"rionvmewrite to buf, testnum = %d, pos = %lu crc = %lu", \
-            testnum++, r->io.nvme.pos, crc);
+        //serverLog(LL_NOTICE,"rionvmewrite to buf, test_write_num = %d, pos = %lu crc = %lu", test_write_num++, r->io.nvme.pos, crc);
     }
     // 数据切割，也可能是不切割刚刚好，反正都是要写下去的
     else{
@@ -313,8 +312,8 @@ static size_t rioNvmeWrite(rio *r, const void *buff, size_t len) {
         res = nvm_cmd_write(dev, src, io_nsectr, r->io.nvme.buf, NULL, NVM_CMD_SCALAR, NULL);
         //r->io.nvme.file->index[r->io.nvme.file->len / io_nbyte] = src[0];   // 整写，结构赋值，将一个步长为最佳写入扇区的首地址结构赋值给索引
         
-        crc = crc64(crc, (unsigned char *)(r->io.nvme.buf), io_nbyte);
-        serverLog(LL_NOTICE, "write crc = %lu, r-buf = %lu", crc, (uint64_t)(r->io.nvme.buf));
+        //crc = crc64(crc, (unsigned char *)(r->io.nvme.buf), io_nbyte);
+        //serverLog(LL_NOTICE, "write crc = %lu, r-buf = %lu", crc, (uint64_t)(r->io.nvme.buf));
         r->io.nvme.file->len += io_nbyte; // 记录的是文件实际长度
         // 重置buf区
         memset(r->io.nvme.buf, 0, io_nbyte);
@@ -359,11 +358,11 @@ static size_t rioNvmeRead(rio *r, void *buff, size_t len) {
 	struct nvm_addr src[io_nsectr];	//扇区地址数组
     // 这是多数情况，放在if里，不足最佳写入扇区的先存入buf
     // 这里不取等号是因为让这种情况进入else，从OCSSD读取缓冲区大小的数据
-    static int testnum = 0;
+    //static int test_read_num = 0;
     if(r->io.nvme.pos + len < io_nbyte){
         memcpy(buf, r->io.nvme.buf + r->io.nvme.pos, len);
         r->io.nvme.pos += len;
-        serverLog(LL_NOTICE,"rionvmeread from buf, testnum = %d, pos = %lu", testnum++, r->io.nvme.pos);
+        //serverLog(LL_NOTICE,"rionvmeread from buf, test_read_num = %d, pos = %lu", test_read_num++, r->io.nvme.pos);
     }
     // 数据切割，也可能是不切割刚刚好,就是if的=号情况，反正是要写下去的
     else{
@@ -376,7 +375,7 @@ static size_t rioNvmeRead(rio *r, void *buff, size_t len) {
 			src[idx].l.sectr = r->io.nvme.sectr + idx;
 		}
         res = nvm_cmd_read(dev, src, io_nsectr, r->io.nvme.buf, NULL, NVM_CMD_SCALAR, NULL);
-        int i;
+        /*int i;
         for( i = 0; i < io_nbyte; i++){
             if(buf_global[i] != r->io.nvme.buf[i]){
                 serverLog(LL_NOTICE, "i = %d diff out", i);
@@ -385,12 +384,12 @@ static size_t rioNvmeRead(rio *r, void *buff, size_t len) {
         }
         if(i == io_nbyte){
             serverLog(LL_NOTICE, "data equal");
-        }
+        }*/
 
-        serverLog(LL_NOTICE,"rioNvmeRead:rioNvmeRead read from chunk：chunk:%u %u %u %u",  src[0].l.pugrp, src[0].l.punit, src[0].l.chunk, src[0].l.sectr);         // 输出信息，后期注释掉
-        uint64_t crc = 0;
-        crc = crc64(crc, (unsigned char *)(r->io.nvme.buf), io_nbyte);
-        serverLog(LL_NOTICE, "read crc = %lu r-buf = %lu", crc, (uint64_t)(r->io.nvme.buf));
+        //serverLog(LL_NOTICE,"rioNvmeRead:rioNvmeRead read from chunk：chunk:%u %u %u %u",  src[0].l.pugrp, src[0].l.punit, src[0].l.chunk, src[0].l.sectr);         // 输出信息，后期注释掉
+        //uint64_t crc = 0;
+        //crc = crc64(crc, (unsigned char *)(r->io.nvme.buf), io_nbyte);
+        //serverLog(LL_NOTICE, "read crc = %lu r-buf = %lu", crc, (uint64_t)(r->io.nvme.buf));
 
         // 此处存在恰好读完，不继续拷贝情况，memcpy不出错，只是不执行
         memcpy(buf + io_nbyte - r->io.nvme.pos, r->io.nvme.buf, len - (io_nbyte - r->io.nvme.pos));
@@ -425,7 +424,7 @@ static int rioNvmeFlush(rio *r) {
         return 0;
     }
     const size_t io_nsectr = nvm_dev_get_ws_opt(dev);       // 获取最佳写入扇区数
-    const size_t io_nbyte = io_nsectr * geo->l.nbytes;      // 最佳写入字节数
+    //const size_t io_nbyte = io_nsectr * geo->l.nbytes;      // 最佳写入字节数
     struct nvm_addr src[io_nsectr];	//扇区地址数组
     uint64_t crc = 0;
     int res =0;
@@ -442,10 +441,10 @@ static int rioNvmeFlush(rio *r) {
 			src[idx].l.sectr = r->io.nvme.sectr + idx;
 	}
 	res = nvm_cmd_write(dev, src, io_nsectr, r->io.nvme.buf, NULL, NVM_CMD_SCALAR, NULL);
-    uint64_t crcc = 0;
+    /*uint64_t crcc = 0;
     crcc = crc64(crcc, (unsigned char *)(r->io.nvme.buf), io_nbyte);
     serverLog(LL_NOTICE, "flush write crc = %lu r-buf = %lu", crcc, (uint64_t)(r->io.nvme.buf));
-
+    */
     r->io.nvme.sectr += io_nsectr;
     if (res < 0) {
 		serverLog(LL_NOTICE, "rioNvmeFlush:nvm_cmd_write error.");
@@ -454,10 +453,10 @@ static int rioNvmeFlush(rio *r) {
 
     r->io.nvme.file->len += r->io.nvme.pos; // 记录的是文件实际长度
     //r->io.nvme.file->index[r->io.nvme.file->len / io_nbyte] = src[0];   // 文件末尾，数据不是整的，不需要再次判断是否有余数情况，结构赋值，将一个步长为最佳写入扇区的首地址结构赋值给索引
-    serverLog(LL_NOTICE, "rioNvmeFlush:file_len=%lu processed_bytes=%lu", rdb_file_nvme.len, r->processed_bytes);
-    serverLog(LL_NOTICE,"rioNvmeFlush:rioNvmeFlush down chunk:%u %u %u %u", r->io.nvme.chunk.l.pugrp, r->io.nvme.chunk.l.punit, r->io.nvme.chunk.l.chunk, r->io.nvme.chunk.l.sectr);         // 输出信息，后期注释
+    //serverLog(LL_NOTICE, "rioNvmeFlush:file_len=%lu processed_bytes=%lu", rdb_file_nvme.len, r->processed_bytes);
+    //serverLog(LL_NOTICE,"rioNvmeFlush:rioNvmeFlush down chunk:%u %u %u %u", r->io.nvme.chunk.l.pugrp, r->io.nvme.chunk.l.punit, r->io.nvme.chunk.l.chunk, r->io.nvme.chunk.l.sectr);         // 输出信息，后期注释
 
-    serverLog(LL_NOTICE, "********FLUSH READ RIGHT NOW*********");
+    /*serverLog(LL_NOTICE, "********FLUSH READ RIGHT NOW*********");
     memcpy(buf_global, r->io.nvme.buf, io_nbyte);
 
     char *buf_read = nvm_buf_alloc(dev, io_nbyte, NULL);
@@ -466,6 +465,7 @@ static int rioNvmeFlush(rio *r) {
         return -1;
     }
     res = nvm_cmd_read(dev, src, io_nsectr, buf_read, NULL, NVM_CMD_SCALAR, NULL);
+
     int i;
     for(i = 0; i < io_nbyte; i++){
         if(buf_read[i] != r->io.nvme.buf[i]){
@@ -476,9 +476,9 @@ static int rioNvmeFlush(rio *r) {
     if(i == io_nbyte){
         serverLog(LL_NOTICE, "data equal");
     }
-
     crcc = crc64(crcc, (unsigned char *)buf_read, io_nbyte);
     serverLog(LL_NOTICE, "flush read crc = %lu buf = %lu", crc, (uint64_t)buf_read);
+    */
 
 OUT:
     // 为AOF持久化到open-channel SSD预申请一个chunk
@@ -524,13 +524,13 @@ OUT:
     }
     fclose(rdb_file_fp);
     */  
-    serverLog(LL_NOTICE, "process byte = %lu", r->processed_bytes);
+    serverLog(LL_NOTICE, "RDB save process byte = %lu", r->processed_bytes);
        
     return 1;
 }
 
 int rdbLoadFileMeta(rio *r){
-    r->io.nvme.file = &rdb_file_nvme;
+    r->io.nvme.file = &rdb_file_nvme;  //feihua 
     FILE *rdb_file_fp;
     if((rdb_file_fp = fopen("rdb_meta_file", "r")) == NULL){ 
         serverLog(LL_NOTICE, "rdbLoadFileMeta:can not open rdb_meta_file.");
@@ -545,6 +545,7 @@ int rdbLoadFileMeta(rio *r){
         serverLog(LL_NOTICE, "rdbLoadFileMeta:crc check is unequal.crc = %lu r.crc = %lu", crc, rdb_file_nvme.crc);
         return -1;
     }
+    serverLog(LL_NOTICE,"load chunk:%u %u %u %u", rdb_file_nvme.index[0].l.pugrp, rdb_file_nvme.index[0].l.punit, rdb_file_nvme.index[0].l.chunk, rdb_file_nvme.index[0].l.sectr);         // 输出信息，后期注释掉
     fclose(rdb_file_fp);
     return 0;
 }
@@ -568,9 +569,9 @@ void rioInitWithNvme(rio *r, int rw) {
 	    if (!dev) {
             serverLog(LL_NOTICE, "open open-channel SSDs nvm_dev fail.");
 	    }
-        else{
+        /*else{
             serverLog(LL_NOTICE, "open open-channel SSDs nvm_dev success.");
-        }
+        }*/
         geo = nvm_dev_get_geo(dev);
     }  
     r->io.nvme.dev = dev;    //我觉得还是应该使用全局变量，dev字段是为了多设备考虑。
