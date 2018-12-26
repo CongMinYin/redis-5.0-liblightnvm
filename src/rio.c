@@ -135,6 +135,7 @@ static off_t rioFileTell(rio *r) {
 /* Flushes any buffer to target device if applicable. Returns 1 on success
  * and 0 on failures. */
 static int rioFileFlush(rio *r) {
+    serverLog(LL_NOTICE, "process byte = %lu", r->processed_bytes);
     return (fflush(r->io.file.fp) == 0) ? 1 : 0;
 }
 

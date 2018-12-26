@@ -333,6 +333,7 @@ void flushAppendOnlyFile(int force) {
     int sync_in_progress = 0;
     mstime_t latency;
 
+    //serverLog(LL_NOTICE, "server.aof_state=%d server.aof_fsync= %d len = %lu", server.aof_state, server.aof_fsync, sdslen(server.aof_buf));
     if (sdslen(server.aof_buf) == 0) return;
 
     if (server.aof_fsync == AOF_FSYNC_EVERYSEC)
@@ -366,6 +367,7 @@ void flushAppendOnlyFile(int force) {
      * or alike */
 
     latencyStartMonitor(latency);
+    serverLog(LL_NOTICE, "*****write %lu******", sdslen(server.aof_buf));
     nwritten = aofWrite(server.aof_fd,server.aof_buf,sdslen(server.aof_buf));
     latencyEndMonitor(latency);
     /* We want to capture different events for delayed writes:

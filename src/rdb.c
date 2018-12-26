@@ -1247,6 +1247,7 @@ int rdbSave(char *filename, rdbSaveInfo *rsi) {
     }
 
     /* Make sure data will not remain on the OS's output buffers */
+    rioFlush(&rdb);
     if (fflush(fp) == EOF) goto werr;
     if (fsync(fileno(fp)) == -1) goto werr;
     if (fclose(fp) == EOF) goto werr;
@@ -1296,7 +1297,10 @@ int rdbSaveBackground(char *filename, rdbSaveInfo *rsi) {
         /* Child */
         closeListeningSockets(0);
         redisSetProcTitle("redis-rdb-bgsave");
+        long long s = ustime();
         retval = rdbSave(filename,rsi);
+        long long e = ustime();
+        serverLog(LL_NOTICE, "start time = %llu, end time = %llu, difference = %llu.", s, e, e - s);
         if (retval == C_OK) {
             size_t private_dirty = zmalloc_get_private_dirty(-1);
 
@@ -1859,6 +1863,7 @@ int rdbLoadRio(rio *rdb, rdbSaveInfo *rsi, int loading_aof) {
         errno = EINVAL;
         return C_ERR;
     }
+    serverLog(LL_NOTICE,"rdbloadrio redis version ok");
     rdbver = atoi(buf+5);
     if (rdbver < 1 || rdbver > RDB_VERSION) {
         serverLog(LL_WARNING,"Can't handle RDB format version %d",rdbver);

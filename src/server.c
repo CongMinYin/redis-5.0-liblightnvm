@@ -1254,14 +1254,14 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     } else {
         /* If there is not a background saving/rewrite in progress check if
          * we have to save/rewrite now. */
-        for (j = 0; j < server.saveparamslen; j++) {
+        /*for (j = 0; j < server.saveparamslen; j++) {
             struct saveparam *sp = server.saveparams+j;
-
+        
             /* Save if we reached the given amount of changes,
              * the given amount of seconds, and if the latest bgsave was
              * successful or if, in case of an error, at least
              * CONFIG_BGSAVE_RETRY_DELAY seconds already elapsed. */
-            if (server.dirty >= sp->changes &&
+            /*if (server.dirty >= sp->changes &&
                 server.unixtime-server.lastsave > sp->seconds &&
                 (server.unixtime-server.lastbgsave_try >
                  CONFIG_BGSAVE_RETRY_DELAY ||
@@ -1274,7 +1274,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
                 rdbSaveBackground(server.rdb_filename,rsiptr);
                 break;
             }
-        }
+        }*/
 
         /* Trigger an AOF rewrite if needed. */
         if (server.aof_state == AOF_ON &&
@@ -3845,13 +3845,15 @@ int checkForSentinelMode(int argc, char **argv) {
 
 /* Function called at startup to load RDB or AOF file in memory. */
 void loadDataFromDisk(void) {
+    serverLog(LL_NOTICE,"***********loadDataFromDisk***********");
     long long start = ustime();
+    int r = -2;
     if (server.aof_state == AOF_ON) {
         if (loadAppendOnlyFile(server.aof_filename) == C_OK)
             serverLog(LL_NOTICE,"DB loaded from append only file: %.3f seconds",(float)(ustime()-start)/1000000);
     } else {
         rdbSaveInfo rsi = RDB_SAVE_INFO_INIT;
-        if (rdbLoad(server.rdb_filename,&rsi) == C_OK) {
+        if ((r = rdbLoad(server.rdb_filename,&rsi)) == C_OK) {
             serverLog(LL_NOTICE,"DB loaded from disk: %.3f seconds",
                 (float)(ustime()-start)/1000000);
 
@@ -3876,7 +3878,9 @@ void loadDataFromDisk(void) {
             serverLog(LL_WARNING,"Fatal error loading the DB: %s. Exiting.",strerror(errno));
             exit(1);
         }
-    }
+    
+    }   
+    serverLog(LL_NOTICE, "load disk rdb return %d", r);
 }
 
 void redisOutOfMemoryHandler(size_t allocation_size) {
