@@ -66,7 +66,7 @@ typedef struct _aof_io aof_io;
 
 // 不能手算这个结构长度，一定要用sizeof
 struct _aof_sec_head {  
-    struct nvm_addr next_chunk_head;    //下一个chunk的地址
+    struct nvm_addr next_read_chunk;    //下一个read chunk
     uint64_t crc;                       //CRC校验主要用来判断当前sector是否有效
 };
 
@@ -179,6 +179,7 @@ void rioInitWithNvme(rio *r, int rw);
 int rdbLoadFileMeta(rio *r); 
 
 ssize_t aofWriteNvme(const char *buf, size_t len);
+int rdbPreamble(void);
 
 void rioFreeFdset(rio *r);
 

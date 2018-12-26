@@ -2468,6 +2468,23 @@ void saveCommand(client *c) {
 /* BGSAVE [SCHEDULE] */
 // BGSAVE命令实现，当年持久化执行情况，是否执行
 void bgsaveCommand(client *c) {
+    /*char temp_str[] = "helloworld";
+    serverLog(LL_NOTICE, "*********aof write test**********");
+
+    static size_t len = 0;
+    if(len != 0) {
+        len = 0;
+        while(len < 32*1024*1024){
+            len += aofWriteNvme(temp_str, strlen(temp_str));
+            //serverLog(LL_NOTICE,"len:%d", len);
+        }
+        return ;
+    }
+    else{
+        len = 1;
+        serverLog(LL_NOTICE, "*******should not appear twice*********");
+    }*/
+    
     int schedule = 0;
 
     /* The SCHEDULE option changes the behavior of BGSAVE when an AOF rewrite

@@ -70,7 +70,7 @@ static char *buf_global = NULL;
  */
 static file_nvme rdb_file_nvme = {
     "rdb_file_nvme",    // 文件名字
-    0,                  // 文件长度
+    0                   // 文件长度
 };
 
 // AOF状态结构
@@ -103,6 +103,24 @@ static file_nvme aof_file_nvme = {
  * 假装一下只会丢4k，假装每次写入是1～最佳写入扇区的范围，实际上就是最佳写入扇区
  * 每个最佳写入扇区的头部16个字节 记录当前的chunk信息和crc，主要用crc判断当前chunk是否有效，chunk的最后一个最佳写入扇区记录下一个chunk的信息和crc
  */
+int rdbPreamble(void){
+    if(rdb_file_nvme.len == 0){
+        serverLog(LL_NOTICE,"start rdb preamble saving.");
+        /*
+        if (server.rdb_child_pid != -1) {
+            serverLog(LL_NOTICE,"Background save already in progress");
+            return 0;
+        }*/
+        rdbSaveInfo rsi, *rsiptr;
+        rsiptr = rdbPopulateSaveInfo(&rsi);
+        if (rdbSave(server.rdb_filename,rsiptr) != C_OK) {
+            serverLog(LL_NOTICE, "bgsave preamble fail");
+        }
+        return 1; 
+    }
+    return 0;
+}
+
 ssize_t aofWriteNvme(const char *buf, size_t len) {
     if(dev == NULL){
         serverLog(LL_NOTICE, "rioNvmeWrite:nvme dev is not opened.");
@@ -124,7 +142,8 @@ ssize_t aofWriteNvme(const char *buf, size_t len) {
             aofNvmeIo.pos += len;
             //serverLog(LL_NOTICE,"rionvmewrite to buf");
             totwritten += len;
-            len = 0;
+            //serverLog(LL_NOTICE, "pos:%lu len:%lu", aofNvmeIo.pos, len);
+            len = 0;     
         }
         // 数据切割，也可能是不切割刚刚好，反正都是要写下去的
         else{
@@ -135,8 +154,8 @@ ssize_t aofWriteNvme(const char *buf, size_t len) {
 		            return 0;
                 }
                 aof_sec_head t;
-                t.next_chunk_head = chunk;
-                t.crc =  crc64(t.crc, (unsigned char *)&t.next_chunk_head, sizeof(t.next_chunk_head));
+                t.next_read_chunk = chunk;
+                t.crc =  crc64(t.crc, (unsigned char *)&t.next_read_chunk, sizeof(t.next_read_chunk));
                 memcpy(aofNvmeIo.buf, &t, sizeof(t));   // 替换掉原本的头部信息
 	        }
 
@@ -151,7 +170,8 @@ ssize_t aofWriteNvme(const char *buf, size_t len) {
 			    src[idx].l.sectr = aofNvmeIo.sectr + idx;
 		    }
             res = nvm_cmd_write(dev, src, io_nsectr, aofNvmeIo.buf, NULL, NVM_CMD_SCALAR, NULL);
-            
+            serverLog(LL_NOTICE, "buf len:%lu head len:%lu rioNvmeWrite:nvm_cmd_write chunk %u sec %u", io_nbyte, sizeof(aof_sec_head), src[0].l.chunk, src[0].l.sectr);
+
             // 重置buf区
             memset(aofNvmeIo.buf + sizeof(aof_sec_head), 0, io_nbyte - sizeof(aof_sec_head));
             aofNvmeIo.pos = sizeof(aof_sec_head);
@@ -488,8 +508,8 @@ OUT:
 	}
     aofNvmeIo.chunk = rdb_file_nvme.aof_chunk_head;
     aof_sec_head t;
-    t.next_chunk_head = aofNvmeIo.chunk;
-    t.crc =  crc64(t.crc, (unsigned char *)&t.next_chunk_head, sizeof(t.next_chunk_head));
+    t.next_read_chunk = aofNvmeIo.chunk;
+    t.crc =  crc64(t.crc, (unsigned char *)&t.next_read_chunk, sizeof(t.next_read_chunk));
     memcpy(aofNvmeIo.buf, &t, sizeof(t));
     aofNvmeIo.pos += sizeof(t);
 
@@ -534,9 +554,11 @@ int rdbLoadFileMeta(rio *r){
     FILE *rdb_file_fp;
     if((rdb_file_fp = fopen("rdb_meta_file", "r")) == NULL){ 
         serverLog(LL_NOTICE, "rdbLoadFileMeta:can not open rdb_meta_file.");
+        return -1;
     }
     if(fread(&rdb_file_nvme, sizeof(rdb_file_nvme), 1, rdb_file_fp) == 0){
         serverLog(LL_NOTICE, "rdbLoadFileMeta:can not read rdb_meta_file.");
+        return -1;
     }
 
     uint64_t crc = 0;
@@ -545,7 +567,7 @@ int rdbLoadFileMeta(rio *r){
         serverLog(LL_NOTICE, "rdbLoadFileMeta:crc check is unequal.crc = %lu r.crc = %lu", crc, rdb_file_nvme.crc);
         return -1;
     }
-    serverLog(LL_NOTICE,"load chunk:%u %u %u %u", rdb_file_nvme.index[0].l.pugrp, rdb_file_nvme.index[0].l.punit, rdb_file_nvme.index[0].l.chunk, rdb_file_nvme.index[0].l.sectr);         // 输出信息，后期注释掉
+    serverLog(LL_NOTICE,"rdbLoadFileMeta:load chunk:%u %u %u %u", rdb_file_nvme.index[0].l.pugrp, rdb_file_nvme.index[0].l.punit, rdb_file_nvme.index[0].l.chunk, rdb_file_nvme.index[0].l.sectr);         // 输出信息，后期注释掉
     fclose(rdb_file_fp);
     return 0;
 }

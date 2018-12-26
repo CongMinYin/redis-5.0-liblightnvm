@@ -1254,14 +1254,14 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     } else {
         /* If there is not a background saving/rewrite in progress check if
          * we have to save/rewrite now. */
-        for (j = 0; j < server.saveparamslen; j++) {
+        /*for (j = 0; j < server.saveparamslen; j++) {
             struct saveparam *sp = server.saveparams+j;
-
+        */
             /* Save if we reached the given amount of changes,
              * the given amount of seconds, and if the latest bgsave was
              * successful or if, in case of an error, at least
              * CONFIG_BGSAVE_RETRY_DELAY seconds already elapsed. */
-            if (server.dirty >= sp->changes &&
+            /*if (server.dirty >= sp->changes &&
                 server.unixtime-server.lastsave > sp->seconds &&
                 (server.unixtime-server.lastbgsave_try >
                  CONFIG_BGSAVE_RETRY_DELAY ||
@@ -1274,7 +1274,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
                 rdbSaveBackground(server.rdb_filename,rsiptr);
                 break;
             }
-        }
+        }*/
 
         /* Trigger an AOF rewrite if needed. */
         if (server.aof_state == AOF_ON &&
@@ -3845,10 +3845,9 @@ int checkForSentinelMode(int argc, char **argv) {
 
 /* Function called at startup to load RDB or AOF file in memory. */
 void loadDataFromDisk(void) {
-    //return ;
-    //serverLog(LL_NOTICE, "*************loadDataFromDisk***************");
     long long start = ustime();
     if (server.aof_state == AOF_ON) {
+        serverLog(LL_NOTICE, "*******AOF_ON loaddatafromdisk*********");
         if (loadAppendOnlyFile(server.aof_filename) == C_OK)
             serverLog(LL_NOTICE,"DB loaded from append only file: %.3f seconds",(float)(ustime()-start)/1000000);
     } else {

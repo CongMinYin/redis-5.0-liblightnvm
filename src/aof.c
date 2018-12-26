@@ -332,6 +332,12 @@ ssize_t aofWrite(int fd, const char *buf, size_t len) {
 #define AOF_WRITE_LOG_ERROR_RATE 30 /* Seconds between errors logging. */
 // force参数为1时，为强制同步
 void flushAppendOnlyFile(int force) {
+    //return ;
+    // is there has a rdb snapshot?
+    if(rdbPreamble() == 1){
+        return ;
+    }
+
     ssize_t nwritten;
     int sync_in_progress = 0;
     mstime_t latency;
@@ -339,7 +345,8 @@ void flushAppendOnlyFile(int force) {
     // if (sdslen(server.aof_buf) == 0) return;
     // 小于4k也直接返回，保证整写，去除写放大，提高性能
     if (sdslen(server.aof_buf) < 4096) return;
-
+    
+    //serverLog(LL_NOTICE, "enter");
     // 是否有aof操作在后台执行
     if (server.aof_fsync == AOF_FSYNC_EVERYSEC)
         sync_in_progress = bioPendingJobsOfType(BIO_AOF_FSYNC) != 0;
@@ -378,9 +385,10 @@ void flushAppendOnlyFile(int force) {
     // 计算时间，并写入文件,残留的4k尾巴在函数尾部出处理
     latencyStartMonitor(latency);
     //nwritten = aofWrite(server.aof_fd,server.aof_buf,sdslen(server.aof_buf));
+    long long start_time = ustime();
     nwritten = aofWriteNvme(server.aof_buf, sdslen(server.aof_buf));
-    serverLog(LL_NOTICE, "write length = %lu", sdslen(server.aof_buf));
     latencyEndMonitor(latency);
+    serverLog(LL_NOTICE, "write length = %lu time:%llu us", sdslen(server.aof_buf), ustime() - start_time);
     /* We want to capture different events for delayed writes:
      * when the delay happens with a pending fsync, or with a saving child
      * active, and when the above two conditions are missing.
@@ -398,6 +406,7 @@ void flushAppendOnlyFile(int force) {
     /* We performed the write so reset the postponed flush sentinel to zero. */
     server.aof_flush_postponed_start = 0;
 
+    //serverLog(LL_NOTICE, "error check");
     // 如果写入长度和缓冲区长度不一致，出错
     if (nwritten != (ssize_t)sdslen(server.aof_buf)) {
         static time_t last_write_error_log = 0;
@@ -483,36 +492,40 @@ void flushAppendOnlyFile(int force) {
         sdsfree(server.aof_buf);
         server.aof_buf = sdsempty();
     }*/
+    //serverLog(LL_NOTICE, "run to new sds");
     //处理尾巴,按照原先的思想，先释放再用新的，这里是先申请新的再释放，再指向
     if(sdslen(server.aof_buf) % 4096 != 0){
         sds temp_buf = sdsempty();
-        sdscatlen(temp_buf, server.aof_buf + sdslen(server.aof_buf) - (sdslen(server.aof_buf) % 4096), sdslen(server.aof_buf) % 4096);
+        temp_buf = sdscatlen(temp_buf, server.aof_buf + sdslen(server.aof_buf) - (sdslen(server.aof_buf) % 4096), sdslen(server.aof_buf) % 4096);
         sdsfree(server.aof_buf);
         server.aof_buf = temp_buf;
     }
+    //serverLog(LL_NOTICE, "run end new sds");
 
     /* Don't fsync if no-appendfsync-on-rewrite is set to yes and there are
      * children doing I/O in the background. */
     // 正在执行重写，BGSAVE BGAOFWRITE 则不同步
-    if (server.aof_no_fsync_on_rewrite &&
+    /*if (server.aof_no_fsync_on_rewrite &&
         (server.aof_child_pid != -1 || server.rdb_child_pid != -1))
             return;
-
+    */
+    //serverLog(LL_NOTICE, "rewrite");
     /* Perform the fsync if needed. */
-    // 开始同步
-    if (server.aof_fsync == AOF_FSYNC_ALWAYS) {
+    // 开始同步 1s/times
+    /*if (server.aof_fsync == AOF_FSYNC_ALWAYS) {
         /* redis_fsync is defined as fdatasync() for Linux in order to avoid
          * flushing metadata. */
-        latencyStartMonitor(latency);
+        /*latencyStartMonitor(latency);
         redis_fsync(server.aof_fd); /* Let's try to get this data on the disk */
-        latencyEndMonitor(latency);
+        /*latencyEndMonitor(latency);
         latencyAddSampleIfNeeded("aof-fsync-always",latency);
         server.aof_last_fsync = server.unixtime;
     } else if ((server.aof_fsync == AOF_FSYNC_EVERYSEC &&
                 server.unixtime > server.aof_last_fsync)) {
         if (!sync_in_progress) aof_background_fsync(server.aof_fd);     //如果设置1s执行一次，则应该是这句话
         server.aof_last_fsync = server.unixtime;
-    }
+    }*/
+
 }
 
 sds catAppendOnlyGenericCommand(sds dst, int argc, robj **argv) {
