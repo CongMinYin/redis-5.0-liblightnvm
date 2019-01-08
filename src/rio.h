@@ -44,6 +44,22 @@
 //1048576=1024x1024  1M
 #define INDEX_CHUNKN 256 
 
+struct _chunk_record {
+    uint64_t erase_cnt	: 32;	///chunk erase count
+	uint64_t chunk	: 16;	///< Chunk in PU
+	uint64_t punit	: 8;	///< Parallel Unit (PU) in PUG
+	uint64_t pugrp	: 8;	///< Parallel Unit Group (PUG) 
+};
+
+typedef struct _chunk_record chunk_record;
+
+struct _chunk_list {
+    chunk_record chunk;
+    struct _chunk_list *next;
+};
+
+typedef struct _chunk_list chunk_list;
+
 struct _file_nvme {
     char filename[16];
     size_t len;                     
@@ -177,9 +193,11 @@ void rioInitWithFdset(rio *r, int *fds, int numfds);
 void rioInitWithNvme(rio *r, int rw);
 
 int rdbLoadFileMeta(rio *r); 
-
 ssize_t aofWriteNvme(const char *buf, size_t len);
+ssize_t aofNvmeRead(char *buf, size_t len);
 int rdbPreamble(void);
+void rdbChunkRecycle(void);
+void eraseChunk(void);
 
 void rioFreeFdset(rio *r);
 

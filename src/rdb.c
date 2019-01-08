@@ -1347,6 +1347,11 @@ int rdbSaveBackground(char *filename, rdbSaveInfo *rsi) {
          * 这里如果要直接写到ocssd，需要调用liblightnvm库，直接写入到chunk中
          * 因为没有文件概念，需要组织地址空间，能写入，也能正确加载
          */
+
+        //在保存之前将上一次bgsave的chunk回收到erase list
+        rdbChunkRecycle();
+
+        // rbd save 存储到ocssd chunk
         long long s = ustime();
         retval = rdbSave(filename,rsi);
         long long e = ustime();

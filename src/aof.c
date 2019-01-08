@@ -710,61 +710,46 @@ void freeFakeClient(struct client *c) {
  * fatal error an error message is logged and the program exists. */
 int loadAppendOnlyFile(char *filename) {
     struct client *fakeClient;
-    FILE *fp = fopen(filename,"r");
     struct redis_stat sb;
     int old_aof_state = server.aof_state;
-    long loops = 0;
+    //long loops = 0;
     off_t valid_up_to = 0; /* Offset of latest well-formed command loaded. */
     off_t valid_before_multi = 0; /* Offset before MULTI command loaded. */
-
-    if (fp == NULL) {
-        serverLog(LL_WARNING,"Fatal error: can't open the append log file for reading: %s",strerror(errno));
-        exit(1);
-    }
 
     /* Handle a zero-length AOF file as a special case. An empty AOF file
      * is a valid AOF because an empty server with AOF enabled will create
      * a zero length file at startup, that will remain like that if no write
      * operation is received. */
-    if (fp && redis_fstat(fileno(fp),&sb) != -1 && sb.st_size == 0) {
-        server.aof_current_size = 0;
-        fclose(fp);
-        return C_ERR;
-    }
+    // 处理空AOF情况，那么rdb文件的末尾还是会有地址，需要读出来，不需要单独处理
+    
 
     /* Temporarily disable AOF, to prevent EXEC from feeding a MULTI
      * to the same file we're about to read. */
     server.aof_state = AOF_OFF;
 
     fakeClient = createFakeClient();
-    startLoading(fp);
+    startLoading(NULL);
 
     /* Check if this AOF file has an RDB preamble. In that case we need to
      * load the RDB file and later continue loading the AOF tail. */
     /* 如果AOF文件有一个RDB文件的前序，我们需要先加载RDB文件
+     * 修改以后必然有一个RDB前序
       */
-    char sig[5]; /* "REDIS" */
-    if (fread(sig,1,5,fp) != 5 || memcmp(sig,"REDIS",5) != 0) {
-        /* No RDB preamble, seek back at 0 offset. */
-        if (fseek(fp,0,SEEK_SET) == -1) goto readerr;
-    } else {
         /* RDB preamble. Pass loading the RDB functions. */
         rio rdb;
 
         serverLog(LL_NOTICE,"Reading RDB preamble from AOF file...");
-        if (fseek(fp,0,SEEK_SET) == -1) goto readerr;
-        rioInitWithFile(&rdb,fp);
+        rioInitWithNvme(&rdb, RIO_NVME_READ);
         if (rdbLoadRio(&rdb,NULL,1) != C_OK) {
             serverLog(LL_WARNING,"Error reading the RDB preamble of the AOF file, AOF loading aborted");
             goto readerr;
         } else {
             serverLog(LL_NOTICE,"Reading the remaining AOF tail...");
         }
-    }
 
     /* Read the actual AOF file, in REPL format, command by command. */
     while(1) {
-        int argc, j;
+        int argc, j, ret;
         unsigned long len;
         robj **argv;
         char buf[128];
@@ -772,16 +757,15 @@ int loadAppendOnlyFile(char *filename) {
         struct redisCommand *cmd;
 
         /* Serve the clients from time to time */
-        if (!(loops++ % 1000)) {
+        /*if (!(loops++ % 1000)) {
             loadingProgress(ftello(fp));
             processEventsWhileBlocked();
-        }
-
-        if (fgets(buf,sizeof(buf),fp) == NULL) {
-            if (feof(fp))
-                break;
-            else
-                goto readerr;
+        }*/
+        ret = aofNvmeRead(buf,sizeof(buf));
+        if (ret == -1) {
+            goto readerr;
+        } else if (ret == 0){
+            break;
         }
         if (buf[0] != '*') goto fmterr;
         if (buf[1] == '\0') goto readerr;
@@ -793,25 +777,37 @@ int loadAppendOnlyFile(char *filename) {
         fakeClient->argv = argv;
 
         for (j = 0; j < argc; j++) {
-            if (fgets(buf,sizeof(buf),fp) == NULL) {
+            ret = aofNvmeRead(buf,sizeof(buf));
+            if (ret == -1) {
                 fakeClient->argc = j; /* Free up to j-1. */
                 freeFakeClientArgv(fakeClient);
                 goto readerr;
+            } else if (ret == 0){
+                break;
             }
+
             if (buf[0] != '$') goto fmterr;
             len = strtol(buf+1,NULL,10);
             argsds = sdsnewlen(SDS_NOINIT,len);
-            if (len && fread(argsds,len,1,fp) == 0) {
+
+            ret = aofNvmeRead(argsds,len);
+            if (len && ret == -1) {
                 sdsfree(argsds);
                 fakeClient->argc = j; /* Free up to j-1. */
                 freeFakeClientArgv(fakeClient);
                 goto readerr;
+            }else if (ret == 0){
+                break;
             }
             argv[j] = createObject(OBJ_STRING,argsds);
-            if (fread(buf,2,1,fp) == 0) {
-                fakeClient->argc = j+1; /* Free up to j. */
+
+            ret = aofNvmeRead(buf,2);
+            if (ret == -1) {
+                fakeClient->argc = j; /* Free up to j-1. */
                 freeFakeClientArgv(fakeClient);
-                goto readerr; /* discard CRLF */
+                goto readerr;
+            } else if (ret == 0){
+                break;
             }
         }
 
@@ -847,7 +843,7 @@ int loadAppendOnlyFile(char *filename) {
          * argv/argc of the client instead of the local variables. */
         freeFakeClientArgv(fakeClient);
         fakeClient->cmd = NULL;
-        if (server.aof_load_truncated) valid_up_to = ftello(fp);
+        //if (server.aof_load_truncated) valid_up_to = ftello(fp);
     }
 
     /* This point can only be reached when EOF is reached without errors.
@@ -862,7 +858,7 @@ int loadAppendOnlyFile(char *filename) {
     }
 
 loaded_ok: /* DB loaded, cleanup and return C_OK to the caller. */
-    fclose(fp);
+    //fclose(fp);
     freeFakeClient(fakeClient);
     server.aof_state = old_aof_state;
     stopLoading();
@@ -871,18 +867,16 @@ loaded_ok: /* DB loaded, cleanup and return C_OK to the caller. */
     return C_OK;
 
 readerr: /* Read error. If feof(fp) is true, fall through to unexpected EOF. */
-    if (!feof(fp)) {
-        if (fakeClient) freeFakeClient(fakeClient); /* avoid valgrind warning */
         serverLog(LL_WARNING,"Unrecoverable error reading the append only file: %s", strerror(errno));
         exit(1);
-    }
 
 uxeof: /* Unexpected AOF end of file. */
     if (server.aof_load_truncated) {
         serverLog(LL_WARNING,"!!! Warning: short read while loading the AOF file !!!");
         serverLog(LL_WARNING,"!!! Truncating the AOF at offset %llu !!!",
             (unsigned long long) valid_up_to);
-        if (valid_up_to == -1 || truncate(filename,valid_up_to) == -1) {
+        //if (valid_up_to == -1 || truncate(filename,valid_up_to) == -1) {
+        if (valid_up_to == -1) {
             if (valid_up_to == -1) {
                 serverLog(LL_WARNING,"Last valid command offset is invalid");
             } else {

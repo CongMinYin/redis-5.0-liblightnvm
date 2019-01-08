@@ -1348,6 +1348,13 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
             server.rdb_bgsave_scheduled = 0;
     }
 
+    // 新增代码,5s一次
+    run_with_period(1000) {
+        if (server.rdb_child_pid == -1 && server.aof_child_pid == -1) {
+            eraseChunk();
+        }
+    }
+
     server.cronloops++;
     return 1000/server.hz;
 }
