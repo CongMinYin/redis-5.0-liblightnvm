@@ -385,10 +385,8 @@ void flushAppendOnlyFile(int force) {
     // 计算时间，并写入文件,残留的4k尾巴在函数尾部出处理
     latencyStartMonitor(latency);
     //nwritten = aofWrite(server.aof_fd,server.aof_buf,sdslen(server.aof_buf));
-    long long start_time = ustime();
     nwritten = aofWriteNvme(server.aof_buf, sdslen(server.aof_buf));
     latencyEndMonitor(latency);
-    serverLog(LL_NOTICE, "write length = %lu time:%llu us", sdslen(server.aof_buf), ustime() - start_time);
     /* We want to capture different events for delayed writes:
      * when the delay happens with a pending fsync, or with a saving child
      * active, and when the above two conditions are missing.
@@ -710,7 +708,7 @@ void freeFakeClient(struct client *c) {
  * fatal error an error message is logged and the program exists. */
 int loadAppendOnlyFile(char *filename) {
     struct client *fakeClient;
-    struct redis_stat sb;
+    //struct redis_stat sb;
     int old_aof_state = server.aof_state;
     //long loops = 0;
     off_t valid_up_to = 0; /* Offset of latest well-formed command loaded. */
@@ -738,13 +736,20 @@ int loadAppendOnlyFile(char *filename) {
         /* RDB preamble. Pass loading the RDB functions. */
         rio rdb;
 
+        if(rdbLoadFileMeta(&rdb)){
+            serverLog(LL_NOTICE, "aofLoad:rdb_meta_file is null.");
+            stopLoading();
+            return C_OK;
+        }
+
         serverLog(LL_NOTICE,"Reading RDB preamble from AOF file...");
         rioInitWithNvme(&rdb, RIO_NVME_READ);
         if (rdbLoadRio(&rdb,NULL,1) != C_OK) {
             serverLog(LL_WARNING,"Error reading the RDB preamble of the AOF file, AOF loading aborted");
             goto readerr;
         } else {
-            serverLog(LL_NOTICE,"Reading the remaining AOF tail...");
+            serverLog(LL_NOTICE, "rdb load data byte = %lu", rdb.processed_bytes);
+            //serverLog(LL_NOTICE,"Reading the remaining AOF tail...");
         }
 
     /* Read the actual AOF file, in REPL format, command by command. */

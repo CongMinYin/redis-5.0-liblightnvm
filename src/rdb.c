@@ -1252,7 +1252,6 @@ int rdbSave(char *filename, rdbSaveInfo *rsi) {
 
     // 将rio对象rdb指向已存在的rio文件对象
     rioInitWithNvme(&rdb, RIO_NVME_WRITE);
-
     /*
     if (server.rdb_save_incremental_fsync)
         rioSetAutoSync(&rdb,REDIS_AUTOSYNC_BYTES);
@@ -1299,17 +1298,6 @@ int rdbSave(char *filename, rdbSaveInfo *rsi) {
     server.lastsave = time(NULL);
     server.lastbgsave_status = C_OK;
 
-    /*
-    serverLog(LL_NOTICE, "**************RDB LOAD TEST**************");
-    rdbSaveInfo rsi_load = RDB_SAVE_INFO_INIT;
-    long long start = ustime();
-    if (rdbLoad(server.rdb_filename,&rsi_load) == C_OK) {
-        serverLog(LL_NOTICE, "rdb load success, it takes %llu us", ustime() - start);
-    } 
-    else{
-        serverLog(LL_NOTICE, "rdb load fail");
-    }
-    */
     return C_OK;
 
 werr:
@@ -1349,7 +1337,12 @@ int rdbSaveBackground(char *filename, rdbSaveInfo *rsi) {
          */
 
         //在保存之前将上一次bgsave的chunk回收到erase list
+        rdbLoadFileMeta(NULL);
         rdbChunkRecycle();
+        // this func shuld communicate in pipe with father processs,then  executed during loop
+        long long start_erase = ustime();
+        eraseChunk();
+        serverLog(LL_NOTICE, "erase time:%lluus", ustime() - start_erase);
 
         // rbd save 存储到ocssd chunk
         long long s = ustime();
@@ -2134,7 +2127,7 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi) {
     //rioInitWithFile(&rdb,fp);
 
     if(rdbLoadFileMeta(&rdb)){
-        serverLog(LL_NOTICE, "rdbLoad:can not load rdb_meta_file.");
+        serverLog(LL_NOTICE, "rdbLoad:rdb_meta_file is null.");
         stopLoading();
         return 1;
     }
@@ -2473,23 +2466,6 @@ void saveCommand(client *c) {
 /* BGSAVE [SCHEDULE] */
 // BGSAVE命令实现，当年持久化执行情况，是否执行
 void bgsaveCommand(client *c) {
-    /*char temp_str[] = "helloworld";
-    serverLog(LL_NOTICE, "*********aof write test**********");
-
-    static size_t len = 0;
-    if(len != 0) {
-        len = 0;
-        while(len < 32*1024*1024){
-            len += aofWriteNvme(temp_str, strlen(temp_str));
-            //serverLog(LL_NOTICE,"len:%d", len);
-        }
-        return ;
-    }
-    else{
-        len = 1;
-        serverLog(LL_NOTICE, "*******should not appear twice*********");
-    }*/
-    
     int schedule = 0;
 
     /* The SCHEDULE option changes the behavior of BGSAVE when an AOF rewrite

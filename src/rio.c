@@ -62,6 +62,7 @@ static int be_id = NVM_BE_ANY;
 static char nvm_dev_path[NVM_DEV_PATH_LEN] = "/dev/nvme0n1";
 static char *buf_global = NULL;
 
+// need process communication
 static int chunk_use_cnt = 0; 
 static int chunk_erase_cnt = 0;
 
@@ -71,6 +72,7 @@ static int chunk_erase_cnt = 0;
 /* 全局变量表示rdb文件，生存周期持续整个redis运行期间
  * 因为是redis启动的时候加载rdb文件，所以必须持久化，之前只需要一个文件名就可以，现在需要把数据结构持久化下去
  * 仅此一份，可以看成单例，但没做特殊处理
+ * need process communication or file load
  */
 static file_nvme rdb_file_nvme = {
     "rdb_file_nvme",    // 文件名字
@@ -87,7 +89,7 @@ static aof_io aofNvmeIo = {
 //chunk_list rdb_chunk_list = NULL;         // 每次bgsave的时候加入rdb list 有个元数据文件index记录这个了，不需要另外记录
 chunk_list *aof_chunk_list_head = NULL;           // 这个是需要的每次获取chunk的时候加入链表，bgsave的时候将之前的chunk都失效，加入擦除链表
 chunk_list *erase_chunk_list_head = NULL;        // 每次bgsave的时候将上一次的rdb list全部加入erase list，在loop外的那个函数去搞擦除操作，aof加载的时候加入
-int *wear_level_cnt = NULL;        // 数组，malloc申请，大小为多少个chunk，pugrp和puint和
+int *wear_level_cnt = NULL;                     // 数组，zmalloc申请，大小为多少个chunk，pugrp和puint和
 
 /* 全局变量表示aof文件，生存周期持续整个redis运行期间
  * 因为aof操作都在aof.c，所以所有操作都用都过rio.h的接口实现
@@ -141,7 +143,7 @@ ssize_t aofNvmeRead(char *buf, size_t len) {
     uint64_t crc = 0;
     crc =  crc64(crc, (unsigned char *)&(((aof_sec_head *)buf)->next_read_chunk), sizeof(((aof_sec_head *)buf)->next_read_chunk));
     if (crc != ((aof_sec_head *)buf)->crc){
-        serverLog(LL_NOTICE, "aof read crc is different, stop aof load");
+        serverLog(LL_NOTICE, "aof read head crc is different, no valid data ,stop aof load");
         return 0;
     }
 
@@ -230,6 +232,7 @@ ssize_t aofWriteNvme(const char *buf, size_t len) {
         }
         // 数据切割，也可能是不切割刚刚好，反正都是要写下去的
         else{
+            long long start_time = ustime();
             struct nvm_addr src[io_nsectr];	//扇区地址数组
             // chunk已被写满,申请空闲chunk
             if(aofNvmeIo.sectr + io_nsectr == geo->l.nsectr){
@@ -243,7 +246,11 @@ ssize_t aofWriteNvme(const char *buf, size_t len) {
                 t.crc =  crc64(t.crc, (unsigned char *)&t.next_read_chunk, sizeof(t.next_read_chunk));
                 memcpy(aofNvmeIo.buf, &t, sizeof(t));   // 替换掉原本的头部信息
 
-                chunk_list *tmp = (chunk_list *)malloc(sizeof(chunk_list));
+                chunk_list *tmp = (chunk_list *)zmalloc(sizeof(chunk_list));
+                if (tmp == NULL) {
+                    serverLog(LL_NOTICE, "malloc fail");
+                    return -1;
+                }
                 tmp->chunk.pugrp = chunk.l.pugrp;
                 tmp->chunk.punit = chunk.l.punit;
                 tmp->chunk.chunk = chunk.l.chunk;
@@ -262,8 +269,8 @@ ssize_t aofWriteNvme(const char *buf, size_t len) {
 			    src[idx] =aofNvmeIo.chunk;	
 			    src[idx].l.sectr = aofNvmeIo.sectr + idx;
 		    }
-            res = nvm_cmd_write(dev, src, io_nsectr, aofNvmeIo.buf, NULL, NVM_CMD_SCALAR, NULL);
-            serverLog(LL_NOTICE, "buf len:%lu head len:%lu rioNvmeWrite:nvm_cmd_write chunk %u sec %u", io_nbyte, sizeof(aof_sec_head), src[0].l.chunk, src[0].l.sectr);
+            res = nvm_cmd_write(dev, src, io_nsectr, aofNvmeIo.buf, NULL, NVM_CMD_SCALAR, NULL);    
+            //serverLog(LL_NOTICE, "buf len:%lu head len:%lu rioNvmeWrite:nvm_cmd_write chunk %u sec %u", io_nbyte, sizeof(aof_sec_head), src[0].l.chunk, src[0].l.sectr);
 
             // 重置buf区
             memset(aofNvmeIo.buf + sizeof(aof_sec_head), 0, io_nbyte - sizeof(aof_sec_head));
@@ -275,6 +282,7 @@ ssize_t aofWriteNvme(const char *buf, size_t len) {
                 aofNvmeIo.chunk = chunk;
                 aofNvmeIo.sectr = 0;
 	        }
+            serverLog(LL_NOTICE, "write length = %lu time:%llu us", io_nbyte, ustime() - start_time);
         }
 
 		if (res < 0) {
@@ -290,14 +298,18 @@ void rdbChunkRecycle(void) {
     if (rdb_file_nvme.len == 0) {
         return ; 
     }
+
     int rdb_chunk_cnt = rdb_file_nvme.len / (geo->l.nsectr * geo->l.nbytes);
     if (rdb_file_nvme.len % (geo->l.nsectr * geo->l.nbytes)){
         rdb_chunk_cnt++;
     }
-
     // 将chunk收集到erase队列，一般测试只有少量chunk，1个chunk的大小16M， 4K x 4k，头部插入法
-    for (int i = 0; i < rdb_chunk_cnt++; ++i) {
-        chunk_list *tmp = (chunk_list *)malloc(sizeof(chunk_list));
+    for (int i = 0; i < rdb_chunk_cnt; ++i) {
+        chunk_list *tmp = (chunk_list *)zmalloc(sizeof(chunk_list));
+        if (tmp == NULL) {
+            serverLog(LL_NOTICE, "malloc fail");
+            return ;
+        }
         tmp->chunk.pugrp = rdb_file_nvme.index[i].l.pugrp;
         tmp->chunk.punit = rdb_file_nvme.index[i].l.punit;
         tmp->chunk.chunk = rdb_file_nvme.index[i].l.chunk;
@@ -310,6 +322,7 @@ void rdbChunkRecycle(void) {
     chunk_use_cnt -= rdb_chunk_cnt;
     chunk_erase_cnt += rdb_chunk_cnt;
 
+    serverLog(LL_NOTICE, "Recyle rdb erase chunk cnt %d", chunk_erase_cnt);
     if (aof_chunk_list_head == NULL) {
         return ;
     }
@@ -324,6 +337,7 @@ void rdbChunkRecycle(void) {
     erase_chunk_list_head = aof_chunk_list_head;
     chunk_use_cnt -= aof_chunk_cnt;
     chunk_erase_cnt += aof_chunk_cnt;
+    serverLog(LL_NOTICE, "Recyle aof erase chunk cnt %d", chunk_erase_cnt);
 }
 
 void eraseChunk(void) {
@@ -337,7 +351,11 @@ void eraseChunk(void) {
 
     // 如果待擦除个数超过20%，无差别从头到尾擦除,1s/次擦除5个chunk
     if (chunk_erase_cnt > geo->l.npugrp * geo->l.npunit * geo->l.nchunk * 0.2){
-        struct nvm_addr *chunk_addrs = (struct nvm_addr *)malloc(sizeof(struct nvm_addr) * high_erase_cnt);
+        struct nvm_addr *chunk_addrs = (struct nvm_addr *)zmalloc(sizeof(struct nvm_addr) * high_erase_cnt);
+        if (chunk_addrs == NULL) {
+            serverLog(LL_NOTICE, "malloc fail");
+            return ;
+        }
         chunk_list *tmp = erase_chunk_list_head;
         for (int i  = 0; i < high_erase_cnt; ++i) {
             chunk_addrs[i].val = 0;
@@ -346,7 +364,7 @@ void eraseChunk(void) {
             chunk_addrs[i].l.chunk = tmp->chunk.chunk;
             erase_chunk_list_head = erase_chunk_list_head->next;
             wear_level_cnt[tmp->chunk.pugrp*geo->l.npunit*geo->l.nchunk +  tmp->chunk.punit*geo->l.nchunk + tmp->chunk.chunk]++;
-            free(tmp);
+            zfree(tmp);
         }
   
         res = nvm_cmd_erase(dev, chunk_addrs, high_erase_cnt, NULL, NVM_CMD_SCALAR, &ret);
@@ -354,8 +372,8 @@ void eraseChunk(void) {
 		    perror("Erase failure");
 		    return;
 	    }
-
-        free(chunk_addrs);
+        serverLog(LL_NOTICE,"erase chunk quantity:%d", high_erase_cnt);
+        zfree(chunk_addrs);
         chunk_erase_cnt -= high_erase_cnt;
         high_erase_cnt += 5;    //每次递增擦除chunk个数
     } else {
@@ -383,9 +401,10 @@ void eraseChunk(void) {
 		    perror("Erase failure");
 		    return;
 	    }
+        serverLog(LL_NOTICE,"erase chunk:%d", chunk_addr.l.chunk);
         min_erase_chunk_pre->next = min_erase_chunk->next;
         wear_level_cnt[min_erase_chunk->chunk.pugrp*geo->l.npunit*geo->l.nchunk +  min_erase_chunk->chunk.punit*geo->l.nchunk + min_erase_chunk->chunk.chunk]++;
-        free(min_erase_chunk);
+        zfree(min_erase_chunk);
 
         chunk_erase_cnt--;
         high_erase_cnt = 5;     //重置高压下的擦除次数
@@ -529,11 +548,7 @@ static size_t rioNvmeWrite(rio *r, const void *buff, size_t len) {
 			src[idx].l.sectr = r->io.nvme.sectr + idx;
 		}
         res = nvm_cmd_write(dev, src, io_nsectr, r->io.nvme.buf, NULL, NVM_CMD_SCALAR, NULL);
-        //r->io.nvme.file->index[r->io.nvme.file->len / io_nbyte] = src[0];   // 整写，结构赋值，将一个步长为最佳写入扇区的首地址结构赋值给索引
-        
-        //crc = crc64(crc, (unsigned char *)(r->io.nvme.buf), io_nbyte);
-        //serverLog(LL_NOTICE, "write crc = %lu, r-buf = %lu", crc, (uint64_t)(r->io.nvme.buf));
-        r->io.nvme.file->len += io_nbyte; // 记录的是文件实际长度
+        rdb_file_nvme.len += io_nbyte; // 记录的是文件实际长度
         // 重置buf区
         memset(r->io.nvme.buf, 0, io_nbyte);
         // 此处存在恰好写完，0拷贝情况，memcpy不出错，只是不执行
@@ -550,7 +565,7 @@ static size_t rioNvmeWrite(rio *r, const void *buff, size_t len) {
             chunk_use_cnt++;
             serverLog(LL_NOTICE,"rioNvmeWrite:rioNvmeWrite down next chunk:%u %u %u %u", r->io.nvme.chunk.l.pugrp, r->io.nvme.chunk.l.punit, r->io.nvme.chunk.l.chunk, r->io.nvme.chunk.l.sectr);         // 输出信息，后期注释掉
             r->io.nvme.sectr = 0;
-            r->io.nvme.file->index[(r->io.nvme.file->len+len) / geo->l.nsectr / io_nbyte] =  r->io.nvme.chunk; 
+           rdb_file_nvme.index[(rdb_file_nvme.len+len) / geo->l.nsectr / io_nbyte] =  r->io.nvme.chunk; 
         }
 
 		if (res < 0) {
@@ -564,7 +579,6 @@ static size_t rioNvmeWrite(rio *r, const void *buff, size_t len) {
 
 /* Returns 1 or 0 for success/failure. */
 static size_t rioNvmeRead(rio *r, void *buff, size_t len) {
-    //return fread(buf,len,1,r->io.file.fp);
     if(dev == NULL){
         serverLog(LL_NOTICE, "rioNvmeRead:nvme dev is not opened.");
         return 0;
@@ -662,17 +676,13 @@ static int rioNvmeFlush(rio *r) {
 			src[idx].l.sectr = r->io.nvme.sectr + idx;
 	}
 	res = nvm_cmd_write(dev, src, io_nsectr, r->io.nvme.buf, NULL, NVM_CMD_SCALAR, NULL);
-    /*uint64_t crcc = 0;
-    crcc = crc64(crcc, (unsigned char *)(r->io.nvme.buf), io_nbyte);
-    serverLog(LL_NOTICE, "flush write crc = %lu r-buf = %lu", crcc, (uint64_t)(r->io.nvme.buf));
-    */
     r->io.nvme.sectr += io_nsectr;
     if (res < 0) {
 		serverLog(LL_NOTICE, "rioNvmeFlush:nvm_cmd_write error.");
 		return 0;
 	}
 
-    r->io.nvme.file->len += r->io.nvme.pos; // 记录的是文件实际长度
+    rdb_file_nvme.len += r->io.nvme.pos; // 记录的是文件实际长度
 
 OUT:
     // 在init rdb的时候已经申请好了
@@ -680,7 +690,7 @@ OUT:
     t.crc =  crc64(t.crc, (unsigned char *)&(t.next_read_chunk), sizeof(t.next_read_chunk));
     memcpy(aofNvmeIo.buf, &t, sizeof(t));
     aofNvmeIo.pos += sizeof(t);
-
+    
     /* 将rdbfile元数据写到磁盘上，暂时先写到普通硬盘文件上，采用crc校验是否正确
      */
     FILE *rdb_file_fp;
@@ -711,7 +721,10 @@ OUT:
 }
 
 int rdbLoadFileMeta(rio *r){
-    r->io.nvme.file = &rdb_file_nvme;  //feihua 
+    if (r != NULL) {
+        r->io.nvme.file = &rdb_file_nvme;  //feihua 
+    }
+    
     FILE *rdb_file_fp;
     if((rdb_file_fp = fopen("rdb_meta_file", "r")) == NULL){ 
         serverLog(LL_NOTICE, "rdbLoadFileMeta:can not open rdb_meta_file.");
@@ -758,8 +771,12 @@ void rioInitWithNvme(rio *r, int rw) {
         geo = nvm_dev_get_geo(dev);
 
         if (wear_level_cnt == NULL){
-            wear_level_cnt = (chunk_record *)malloc(sizeof(int) * geo->l.npugrp * geo->l.npunit * geo->l.nchunk);
-            memset(wear_level_cnt, 0, sizeof(int) * geo->l.npugrp * geo->l.npunit * geo->l.nchunk);
+            wear_level_cnt = (int *)zmalloc(sizeof(int) * geo->l.npugrp * geo->l.npunit * geo->l.nchunk);
+            if (wear_level_cnt == NULL) {
+                serverLog(LL_NOTICE, "malloc fail");
+                return ;
+            }
+            //memset(wear_level_cnt, 0, sizeof(int) * geo->l.npugrp * geo->l.npunit * geo->l.nchunk);
         }
     }  
     r->io.nvme.dev = dev;    //我觉得还是应该使用全局变量，dev字段是为了多设备考虑。
@@ -801,7 +818,7 @@ void rioInitWithNvme(rio *r, int rw) {
         chunk_use_cnt++;
         serverLog(LL_NOTICE,"init:init get chunk:%u %u %u %u", r->io.nvme.chunk.l.pugrp, r->io.nvme.chunk.l.punit, r->io.nvme.chunk.l.chunk, r->io.nvme.chunk.l.sectr);         // 输出信息，后期注释掉
         r->io.nvme.sectr = 0;
-         memset(&rdb_file_nvme.index, 0, sizeof(rdb_file_nvme.index));    //地址数组置全部0
+        memset(&rdb_file_nvme.index, 0, sizeof(rdb_file_nvme.index));    //地址数组置全部0
         rdb_file_nvme.index[0] = r->io.nvme.chunk;  // 已经申请了第一个chunk地址，赋值
         rdb_file_nvme.len = 0;
         rdb_file_nvme.crc = 0;
@@ -809,7 +826,11 @@ void rioInitWithNvme(rio *r, int rw) {
 		    serverLog(LL_NOTICE, "nvm_cmd_rprt_arbs error, get chunks error.");
 	    }
         chunk_use_cnt++;
-        chunk_list *tmp = (chunk_list *)malloc(sizeof(chunk_list));
+        chunk_list *tmp = (chunk_list *)zmalloc(sizeof(chunk_list));
+        if (tmp == NULL) {
+            serverLog(LL_NOTICE, "malloc fail");
+            return ;
+        }
         tmp->chunk.pugrp = rdb_file_nvme.aof_chunk_head.l.pugrp;
         tmp->chunk.punit = rdb_file_nvme.aof_chunk_head.l.punit;
         tmp->chunk.chunk = rdb_file_nvme.aof_chunk_head.l.chunk;
