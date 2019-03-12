@@ -1,0 +1,6 @@
+#!/bin/bash
+for i in `seq 100000`
+do 
+echo -en "qwertyuiopasdfghjklzxcvbnmqwuieyrtqutuqye" | /usr/local/bin/redis-cli -x set name$i >> redis.log
+done 
+
