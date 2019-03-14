@@ -367,9 +367,13 @@ void flushAppendOnlyFile(int force) {
      * or alike */
 
     latencyStartMonitor(latency);
-    serverLog(LL_NOTICE, "*****write %lu******", sdslen(server.aof_buf));
+    long long s = ustime();   
     nwritten = aofWrite(server.aof_fd,server.aof_buf,sdslen(server.aof_buf));
-    latencyEndMonitor(latency);
+    fsync(server.aof_fd);
+    long long e = ustime();
+    serverLog(LL_NOTICE, "write length:%lu cost time:%llu", sdslen(server.aof_buf),  e - s);
+    latencyEndMonitor(latency); 
+    
     /* We want to capture different events for delayed writes:
      * when the delay happens with a pending fsync, or with a saving child
      * active, and when the above two conditions are missing.
