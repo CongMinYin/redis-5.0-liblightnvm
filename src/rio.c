@@ -563,9 +563,10 @@ static size_t rioNvmeWrite(rio *r, const void *buff, size_t len) {
 		        return 0;
 	        } 
             chunk_use_cnt++;
-            serverLog(LL_NOTICE,"rioNvmeWrite:rioNvmeWrite down next chunk:%u %u %u %u", r->io.nvme.chunk.l.pugrp, r->io.nvme.chunk.l.punit, r->io.nvme.chunk.l.chunk, r->io.nvme.chunk.l.sectr);         // 输出信息，后期注释掉
+            //serverLog(LL_NOTICE,"rioNvmeWrite:rioNvmeWrite down next chunk:%u %u %u %u", r->io.nvme.chunk.l.pugrp, r->io.nvme.chunk.l.punit, r->io.nvme.chunk.l.chunk, r->io.nvme.chunk.l.sectr);         // 输出信息，后期注释掉
             r->io.nvme.sectr = 0;
-           rdb_file_nvme.index[(rdb_file_nvme.len+len) / geo->l.nsectr / io_nbyte] =  r->io.nvme.chunk; 
+            rdb_file_nvme.index[(rdb_file_nvme.len+len) / geo->l.nsectr / geo->l.nbytes] =  r->io.nvme.chunk; 
+            //serverLog(LL_NOTICE, "chunk xiabiao:%lu", (rdb_file_nvme.len+len) / geo->l.nsectr / geo->l.nbytes);
         }
 
 		if (res < 0) {
@@ -609,22 +610,6 @@ static size_t rioNvmeRead(rio *r, void *buff, size_t len) {
 			src[idx].l.sectr = r->io.nvme.sectr + idx;
 		}
         res = nvm_cmd_read(dev, src, io_nsectr, r->io.nvme.buf, NULL, NVM_CMD_SCALAR, NULL);
-        /*int i;
-        for( i = 0; i < io_nbyte; i++){
-            if(buf_global[i] != r->io.nvme.buf[i]){
-                serverLog(LL_NOTICE, "i = %d diff out", i);
-                break;
-            }
-        }
-        if(i == io_nbyte){
-            serverLog(LL_NOTICE, "data equal");
-        }*/
-
-        //serverLog(LL_NOTICE,"rioNvmeRead:rioNvmeRead read from chunk：chunk:%u %u %u %u",  src[0].l.pugrp, src[0].l.punit, src[0].l.chunk, src[0].l.sectr);         // 输出信息，后期注释掉
-        //uint64_t crc = 0;
-        //crc = crc64(crc, (unsigned char *)(r->io.nvme.buf), io_nbyte);
-        //serverLog(LL_NOTICE, "read crc = %lu r-buf = %lu", crc, (uint64_t)(r->io.nvme.buf));
-
         // 此处存在恰好读完，不继续拷贝情况，memcpy不出错，只是不执行
         memcpy(buf + io_nbyte - r->io.nvme.pos, r->io.nvme.buf, len - (io_nbyte - r->io.nvme.pos));
         r->io.nvme.pos = len - (io_nbyte - r->io.nvme.pos);
@@ -632,9 +617,10 @@ static size_t rioNvmeRead(rio *r, void *buff, size_t len) {
 
         // chunk已被读取结束，准备下一个chunk的读取工作
         if(r->io.nvme.sectr == geo->l.nsectr){
-            r->io.nvme.chunk = rdb_file_nvme.index[r->processed_bytes+len / io_nbyte];  //从这里看，没必要记录每断sector步长的首地址，记录chunk首地址就可以了
+            //serverLog(LL_NOTICE, "xiabiao:%ld processed_bytes:%lu   %lu  %lu", (r->processed_bytes+len) / geo->l.nsectr / geo->l.nbytes, r->processed_bytes+len,geo->l.nsectr, geo->l.nbytes );
+            r->io.nvme.chunk = rdb_file_nvme.index[(r->processed_bytes) / geo->l.nsectr / geo->l.nbytes + 1];  //从这里看，没必要记录每断sector步长的首地址，记录chunk首地址就可以了
             r->io.nvme.sectr = 0; 
-            serverLog(LL_NOTICE,"rioNvmeRead:rioNvmeRead read from chunk：next index = %lu chunk:%u %u %u %u",  r->processed_bytes+len / io_nbyte, src[0].l.pugrp, src[0].l.punit, src[0].l.chunk, src[0].l.sectr);         // 输出信息，后期注释掉
+            //serverLog(LL_NOTICE,"rioNvmeRead:rioNvmeRead read from chunk：next index = %lu chunk:%u %u %u %u",  r->processed_bytes+len / io_nbyte, src[0].l.pugrp, src[0].l.punit, src[0].l.chunk, src[0].l.sectr);         // 输出信息，后期注释掉
         }
         if (res < 0) {
 			serverLog(LL_NOTICE, "rioNvmeRead:nvm_cmd_read error.");
