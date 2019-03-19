@@ -3857,7 +3857,7 @@ void loadDataFromDisk(void) {
     if (server.aof_state == AOF_ON) {
         serverLog(LL_NOTICE, "*******AOF_ON loaddatafromdisk*********");
         if (loadAppendOnlyFile(server.aof_filename) == C_OK)
-            serverLog(LL_NOTICE,"DB loaded from append only file: %.3f seconds",(float)(ustime()-start)/1000000);
+            serverLog(LL_NOTICE,"DB loaded from append only file: %llu us",(ustime()-start));
     } else {
         // rdb meta data exist?
         rdbSaveInfo rsi = RDB_SAVE_INFO_INIT;
